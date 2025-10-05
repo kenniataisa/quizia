@@ -86,7 +86,7 @@ def generate_questions(text, estilo):
 
     try:
         completion = client.chat.completions.create(
-            model="mistralai/mistral-7b-instruct:free",
+            model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": f"{prompt}\n\nTexto extraído:\n{text[:8000]}"}],
             timeout=120
         )
