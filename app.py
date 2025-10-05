@@ -6,50 +6,38 @@ from supabase import create_client
 import random
 import os
 from dotenv import load_dotenv
+import json
 
 # ======================
-# CONFIGURAÇÃO INICIAL (VERSÃO FINAL E SEGURA)
+# CONFIGURAÇÃO INICIAL
 # ======================
-st.set_page_config(page_title="Gerador de Questões - Quizia", layout="wide")
+st.set_page_config(page_title="Quizia - Quiz Interativo", layout="centered")
 
-# Carrega as variáveis do .env se o arquivo existir (para desenvolvimento local)
+# Carrega as variáveis do .env (para desenvolvimento local)
 load_dotenv()
 
-# Verifica se está rodando no Streamlit Cloud, Vercel ou localmente
-api_key = None
-supabase_url = None
-supabase_key = None
+# Lógica para carregar chaves (funciona localmente, no Vercel e Streamlit Cloud)
+api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY")
+supabase_url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
+supabase_key = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
 
-if 'OPENROUTER_API_KEY' in st.secrets:
-    # Ambiente Streamlit Cloud
-    api_key = st.secrets["OPENROUTER_API_KEY"]
-    supabase_url = st.secrets["SUPABASE_URL"]
-    supabase_key = st.secrets["SUPABASE_KEY"]
-    st.sidebar.success("🔑 Chaves de produção (Streamlit) carregadas!", icon="✅")
-else:
-    # Ambiente Vercel ou Local
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    supabase_url = os.getenv("SUPABASE_URL")
-    supabase_key = os.getenv("SUPABASE_KEY")
-    if api_key:
-        st.sidebar.info("🔑 Chaves de ambiente (Vercel/Local) carregadas.", icon="⚙️")
-
-# Configurações Supabase e OpenRouter
+# Configurações dos clientes Supabase e OpenRouter
 supabase = None
 client = None
 
 if not all([api_key, supabase_url, supabase_key]):
-    st.sidebar.error("⚠️ Chaves não configuradas. Verifique o .env ou as Environment Variables.", icon="🚨")
+    st.sidebar.error("⚠️ Chaves não configuradas. Verifique o .env ou as Environment Variables/Secrets.", icon="🚨")
 else:
     supabase = create_client(supabase_url, supabase_key)
     client = openai.OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
         default_headers={
-            "HTTP-Referer": "https://quizia-app.vercel.app", # Exemplo
+            "HTTP-Referer": "https://quizia-app.vercel.app", 
             "X-Title": "Quizia App",
         },
     )
+    st.sidebar.success("✅ Conectado às APIs!", icon="🚀")
 
 # ======================
 # FUNÇÕES CORE
@@ -70,58 +58,86 @@ def extract_text_from_pdf(uploaded_file):
         st.error(f"Erro ao processar o PDF: {e}")
         return None
 
-def generate_questions(text, estilo):
-    """Gera questões com base apenas em texto."""
+def generate_quiz_from_content(text, estilo, dificuldade):
+    """Gera um quiz em formato JSON estruturado."""
     if not client:
         st.error("Cliente da API não configurado.")
         return None
 
-    prompts = {
-        "Múltipla escolha": "Crie 5 perguntas de múltipla escolha com 4 alternativas cada (A, B, C, D), baseadas neste texto. Indique claramente qual é a alternativa correta para cada pergunta.",
-        "Verdadeiro/Falso": "Crie 5 afirmações e indique se são verdadeiras ou falsas com base no texto, justificando cada resposta.",
-        "Dissertativa": "Crie 5 perguntas abertas que exijam interpretação crítica do texto.",
-        "Flashcards": "Crie pares de pergunta/resposta curtas e diretas, no estilo flashcard, com base nas informações mais importantes do texto."
-    }
-    prompt = prompts.get(estilo, "Crie 5 perguntas com base no texto.")
+    # Lógica para opções aleatórias
+    estilos_disponiveis = ["Múltipla escolha", "Verdadeiro/Falso"]
+    if estilo == "Aleatório":
+        estilo = random.choice(estilos_disponiveis)
+    
+    niveis_disponiveis = ["Fácil", "Médio", "Difícil"]
+    if dificuldade == "Aleatório":
+        dificuldade = random.choice(niveis_disponiveis)
+
+    # Instrução de formato JSON
+    json_format_instruction = """
+    Responda estritamente no seguinte formato JSON, sem nenhum texto ou formatação adicional fora do JSON.
+    O JSON deve ser uma lista de objetos, onde cada objeto representa uma pergunta e contém:
+    - "pergunta": (string) O texto da pergunta.
+    - "estilo": (string) "multipla_escolha" ou "verdadeiro_falso".
+    - "opcoes": (list of strings) Uma lista com as opções. Para 'verdadeiro_falso', a lista deve ser ["Verdadeiro", "Falso"].
+    - "resposta_correta": (string) O texto exato de uma das opções que é a resposta correta.
+    - "justificativa": (string) Uma explicação clara do porquê a resposta está correta e as outras incorretas.
+
+    Exemplo para Múltipla Escolha:
+    [
+      {
+        "pergunta": "Qual a cor do céu em um dia claro?",
+        "estilo": "multipla_escolha",
+        "opcoes": ["Verde", "Azul", "Vermelho", "Amarelo"],
+        "resposta_correta": "Azul",
+        "justificativa": "A dispersão de Rayleigh da luz solar na atmosfera faz com que o céu pareça azul."
+      }
+    ]
+    """
+
+    # Prompt final para a IA
+    prompt_final = (
+        f"Crie 5 perguntas no estilo '{estilo}' com nível de dificuldade '{dificuldade}', baseadas no texto fornecido. "
+        f"{json_format_instruction}\n\n"
+        f"Texto de referência:\n{text[:8000]}"
+    )
 
     try:
         completion = client.chat.completions.create(
-            model="deepseek/deepseek-chat-v3.1:free",
-            messages=[{"role": "user", "content": f"{prompt}\n\nTexto extraído:\n{text[:8000]}"}],
-            timeout=120
+            model="openai/gpt-4o",  # Modelo forte em seguir instruções de formato
+            messages=[{"role": "user", "content": prompt_final}],
+            response_format={"type": "json_object"},
+            timeout=180
         )
-        return completion.choices[0].message.content
+        # O modelo pode retornar o JSON dentro de uma chave, precisamos extrair a lista.
+        response_content = completion.choices[0].message.content
+        response_json = json.loads(response_content)
+        # Supondo que a lista de questões está na chave 'questoes' ou similar, ou é o objeto raiz
+        quiz_data = response_json.get("questoes", response_json)
+        return quiz_data
     except Exception as e:
-        st.error(f"Erro ao chamar a API: {e}")
+        st.error(f"Erro ao gerar ou processar a resposta da IA: {e}")
+        st.error(f"Resposta recebida da IA (pode não ser JSON válido): {response_content}")
         return None
 
 # ======================
-# BANCO DE ERROS (Supabase) - COMPLETO
+# BANCO DE ERROS (Supabase)
 # ======================
-
-def salvar_erro(pergunta, correta, usuario, opcoes, estilo):
-    """Salva um erro no banco de dados Supabase."""
-    if not supabase:
-        st.error("Conexão com o banco de dados não configurada.")
-        return
+def salvar_erro(pergunta, correta, usuario, estilo):
+    if not supabase: return
     try:
         supabase.table("erros").insert({
             "pergunta": pergunta,
             "resposta_correta": correta,
             "resposta_usuario": usuario,
-            "opcoes": opcoes,
             "estilo": estilo
         }).execute()
-        st.toast("Erro registrado para revisão futura!")
+        st.toast("Ops! Erro registrado para sua revisão.", icon="💔")
     except Exception as e:
         st.error(f"Erro ao salvar no Supabase: {e}")
 
-
 def listar_erros():
-    """Lista todos os erros do banco de dados Supabase."""
-    if not supabase:
-        st.error("Conexão com o banco de dados não configurada.")
-        return []
+    if not supabase: return []
     try:
         response = supabase.table("erros").select("*").execute()
         return response.data
@@ -130,7 +146,7 @@ def listar_erros():
         return []
 
 # ======================
-# INTERFACE STREAMLIT - COMPLETA
+# INTERFACE STREAMLIT
 # ======================
 
 # --- Menu Lateral ---
@@ -138,35 +154,83 @@ menu = st.sidebar.radio("Menu", ["Gerar Questões", "Revisar Erros", "Flashcards
 
 # --- Página: Gerar Questões ---
 if menu == "Gerar Questões":
-    st.title("📘 Quizia - Gerador de Questões a partir de PDFs")
-    st.markdown("Envie um arquivo PDF para extrair o texto e gerar um quiz personalizado.")
+    st.title("📘 Quizia - Quiz Interativo com IA")
+    st.markdown("Envie um PDF, escolha o nível e o estilo, e teste seus conhecimentos!")
 
-    uploaded_file = st.file_uploader("Selecione o arquivo PDF", type=["pdf"])
-    estilo = st.selectbox("Escolha o estilo das questões:",
-                          ["Múltipla escolha", "Verdadeiro/Falso", "Dissertativa", "Flashcards"])
+    # Inicialização do estado da sessão
+    if "quiz_data" not in st.session_state:
+        st.session_state.quiz_data = None
+        st.session_state.current_question = 0
+        st.session_state.score = 0
+        st.session_state.answered = False
 
-    if 'questions_generated' not in st.session_state:
-        st.session_state.questions_generated = ""
-
-    if st.button("Gerar Questões", disabled=(not client or not uploaded_file), type="primary"):
-        pdf_text = extract_text_from_pdf(uploaded_file)
+    with st.container(border=True):
+        uploaded_file = st.file_uploader("1. Selecione o arquivo PDF", type=["pdf"])
+        dificuldade = st.selectbox("2. Escolha o Nível de Dificuldade:", ["Fácil", "Médio", "Difícil", "Aleatório"])
+        estilo = st.selectbox("3. Escolha o Estilo das Questões:", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
         
-        if pdf_text:
-            st.success("✅ PDF processado com sucesso!")
-            with st.expander("Pré-visualização do Texto Extraído"):
-                st.text_area("Texto (primeiros 1500 caracteres)", pdf_text[:1500], height=200)
+        if st.button("Gerar Quiz!", type="primary", disabled=(not client or not uploaded_file)):
+            # Reseta o estado do quiz anterior
+            st.session_state.quiz_data = None
+            st.session_state.current_question = 0
+            st.session_state.score = 0
+            st.session_state.answered = False
 
-            with st.spinner("🧠 A IA está pensando... Isso pode levar um momento."):
-                result = generate_questions(pdf_text, estilo)
-                if result:
-                    st.session_state.questions_generated = result
-                else:
-                    st.error("Não foi possível gerar as questões.")
-    
-    if st.session_state.questions_generated:
+            pdf_text = extract_text_from_pdf(uploaded_file)
+            if pdf_text:
+                with st.spinner("🧠 A IA está a criar um quiz desafiador para você..."):
+                    quiz_data = generate_quiz_from_content(pdf_text, estilo, dificuldade)
+                    if quiz_data and isinstance(quiz_data, list):
+                        st.session_state.quiz_data = quiz_data
+                        st.rerun() # Força o recarregamento para exibir a primeira questão
+                    else:
+                        st.error("A IA não conseguiu gerar o quiz no formato esperado. Tente novamente.")
+
+    # --- Lógica de Exibição do Quiz ---
+    if st.session_state.quiz_data:
         st.markdown("---")
-        st.markdown("### ✨ Questões Geradas")
-        st.markdown(st.session_state.questions_generated)
+        st.subheader(f"Pontuação: {st.session_state.score}/{len(st.session_state.quiz_data)}")
+        
+        idx = st.session_state.current_question
+        total_questions = len(st.session_state.quiz_data)
+        
+        if idx < total_questions:
+            question = st.session_state.quiz_data[idx]
+
+            st.markdown(f"#### Pergunta {idx + 1}/{total_questions}")
+            
+            with st.form(key=f"question_form_{idx}"):
+                user_answer = st.radio(
+                    label=question["pergunta"],
+                    options=question["opcoes"],
+                    index=None # Começa sem nenhuma opção selecionada
+                )
+                submitted = st.form_submit_button("Responder")
+
+                if submitted:
+                    st.session_state.answered = True
+                    is_correct = (user_answer == question["resposta_correta"])
+
+                    if is_correct:
+                        st.session_state.score += 1
+                        st.success(f"🎉 Correto! {question['justificativa']}")
+                    else:
+                        st.error(f"❌ Incorreto. A resposta certa era **{question['resposta_correta']}**. {question['justificativa']}")
+                        # Salva o erro no Supabase
+                        salvar_erro(question["pergunta"], question["resposta_correta"], user_answer, question["estilo"])
+            
+            if st.session_state.answered:
+                if st.button("Próxima Pergunta ➡️"):
+                    st.session_state.current_question += 1
+                    st.session_state.answered = False
+                    st.rerun()
+        else:
+            st.balloons()
+            st.success(f"🎉 Quiz Concluído! Sua pontuação final é: {st.session_state.score}/{total_questions}")
+            if st.button("Gerar Novo Quiz"):
+                st.session_state.quiz_data = None
+                st.rerun()
+
 
 # --- Página: Revisar Erros ---
 elif menu == "Revisar Erros":
@@ -192,21 +256,17 @@ elif menu == "Flashcards":
     if not erros:
         st.info("Nenhum erro registrado para usar no modo flashcard.")
     else:
-        # Usar o estado da sessão para não trocar de card a cada interação
         if 'current_card' not in st.session_state or st.button("Próximo Card 🔄"):
             st.session_state.current_card = random.choice(erros)
-            st.session_state.show_answer = False # Reseta a visibilidade da resposta
+            st.session_state.show_answer = False
 
         card = st.session_state.current_card
         
         with st.container(border=True):
             st.markdown(f"**Pergunta:**\n> {card.get('pergunta', 'N/A')}")
             
-            # Botão para revelar a resposta
             if st.button("Revelar Resposta 💡"):
                 st.session_state.show_answer = True
             
-            # Mostra a resposta se o botão foi clicado
             if st.session_state.get('show_answer', False):
                 st.success(f"**Resposta:** {card.get('resposta_correta', 'N/A')}")
-
