@@ -2,5 +2,5 @@ streamlit
 openai
 supabase
 python-dotenv
-PyMuPDF
+pypdf
 Pillow
