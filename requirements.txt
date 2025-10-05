@@ -1,0 +1,6 @@
+streamlit
+openai
+supabase
+python-dotenv
+PyMuPDF
+Pillow
