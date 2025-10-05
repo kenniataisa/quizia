@@ -1,6 +1,6 @@
 import streamlit as st
 import io
-from pypdf import PdfReader  # <<< MUDANÇA AQUI
+from pypdf import PdfReader
 import openai
 from supabase import create_client
 import random
@@ -62,7 +62,9 @@ def extract_text_from_pdf(uploaded_file):
         reader = PdfReader(uploaded_file)
         text = ""
         for page in reader.pages:
-            text += page.extract_text()
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
         return text
     except Exception as e:
         st.error(f"Erro ao processar o PDF: {e}")
@@ -84,7 +86,6 @@ def generate_questions(text, estilo):
 
     try:
         completion = client.chat.completions.create(
-            # Pode usar um modelo menor e mais rápido, já que não precisa de visão
             model="mistralai/mistral-7b-instruct:free",
             messages=[{"role": "user", "content": f"{prompt}\n\nTexto extraído:\n{text[:8000]}"}],
             timeout=120
@@ -95,22 +96,47 @@ def generate_questions(text, estilo):
         return None
 
 # ======================
-# BANCO DE ERROS (Supabase) - Sem alterações
+# BANCO DE ERROS (Supabase) - COMPLETO
 # ======================
+
 def salvar_erro(pergunta, correta, usuario, opcoes, estilo):
-    # ... (código sem alterações)
-    pass
+    """Salva um erro no banco de dados Supabase."""
+    if not supabase:
+        st.error("Conexão com o banco de dados não configurada.")
+        return
+    try:
+        supabase.table("erros").insert({
+            "pergunta": pergunta,
+            "resposta_correta": correta,
+            "resposta_usuario": usuario,
+            "opcoes": opcoes,
+            "estilo": estilo
+        }).execute()
+        st.toast("Erro registrado para revisão futura!")
+    except Exception as e:
+        st.error(f"Erro ao salvar no Supabase: {e}")
+
 
 def listar_erros():
-    # ... (código sem alterações)
-    return []
+    """Lista todos os erros do banco de dados Supabase."""
+    if not supabase:
+        st.error("Conexão com o banco de dados não configurada.")
+        return []
+    try:
+        response = supabase.table("erros").select("*").execute()
+        return response.data
+    except Exception as e:
+        st.error(f"Erro ao listar erros do Supabase: {e}")
+        return []
 
 # ======================
-# INTERFACE STREAMLIT
+# INTERFACE STREAMLIT - COMPLETA
 # ======================
 
+# --- Menu Lateral ---
 menu = st.sidebar.radio("Menu", ["Gerar Questões", "Revisar Erros", "Flashcards"])
 
+# --- Página: Gerar Questões ---
 if menu == "Gerar Questões":
     st.title("📘 Quizia - Gerador de Questões a partir de PDFs")
     st.markdown("Envie um arquivo PDF para extrair o texto e gerar um quiz personalizado.")
@@ -142,5 +168,45 @@ if menu == "Gerar Questões":
         st.markdown("### ✨ Questões Geradas")
         st.markdown(st.session_state.questions_generated)
 
-# O restante do código para "Revisar Erros" e "Flashcards" pode permanecer o mesmo.
-# ...
+# --- Página: Revisar Erros ---
+elif menu == "Revisar Erros":
+    st.title("📂 Histórico de Erros")
+    st.markdown("Revise as questões que você errou para fortalecer seu aprendizado.")
+    
+    erros = listar_erros()
+    if erros:
+        for i, e in enumerate(erros):
+            with st.container(border=True):
+                st.markdown(f"**{i+1}. Pergunta:** {e.get('pergunta', 'N/A')}")
+                st.error(f"Sua resposta: {e.get('resposta_usuario', 'N/A')}")
+                st.success(f"Resposta correta: {e.get('resposta_correta', 'N/A')}")
+    else:
+        st.info("Você ainda não registrou nenhum erro. Continue praticando!")
+
+# --- Página: Flashcards ---
+elif menu == "Flashcards":
+    st.title("🃏 Modo Flashcards")
+    st.markdown("Teste seu conhecimento com base nas questões que você errou anteriormente.")
+    
+    erros = listar_erros()
+    if not erros:
+        st.info("Nenhum erro registrado para usar no modo flashcard.")
+    else:
+        # Usar o estado da sessão para não trocar de card a cada interação
+        if 'current_card' not in st.session_state or st.button("Próximo Card 🔄"):
+            st.session_state.current_card = random.choice(erros)
+            st.session_state.show_answer = False # Reseta a visibilidade da resposta
+
+        card = st.session_state.current_card
+        
+        with st.container(border=True):
+            st.markdown(f"**Pergunta:**\n> {card.get('pergunta', 'N/A')}")
+            
+            # Botão para revelar a resposta
+            if st.button("Revelar Resposta 💡"):
+                st.session_state.show_answer = True
+            
+            # Mostra a resposta se o botão foi clicado
+            if st.session_state.get('show_answer', False):
+                st.success(f"**Resposta:** {card.get('resposta_correta', 'N/A')}")
+
