@@ -281,4 +281,4 @@ elif menu == "Meus Quizzes":
                         st.rerun()
             else:
                 st.balloons()
-                st.success(f"🎉 Quiz Concluído! Sua pontuação final é: {st.session_state.score}/{total_
+                st.success(f"🎉 Quiz Concluído! Sua pontuação final é: {st.session_state.score}/{total_questions}")
