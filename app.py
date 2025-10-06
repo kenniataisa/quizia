@@ -11,7 +11,7 @@ import json
 # ======================
 # CONFIGURAÇÃO INICIAL
 # ======================
-st.set_page_config(page_title="Quizia - Quiz Interativo", layout="centered")
+st.set_page_config(page_title="Quizia - Quiz Interativo com IA", layout="centered", initial_sidebar_state="expanded")
 
 # Carrega as variáveis do .env (para desenvolvimento local)
 load_dotenv()
@@ -26,14 +26,14 @@ supabase = None
 client = None
 
 if not all([api_key, supabase_url, supabase_key]):
-    st.sidebar.error("⚠️ Chaves não configuradas. Verifique o .env ou as Environment Variables/Secrets.", icon="🚨")
+    st.sidebar.error("⚠️ Chaves não configuradas.", icon="🚨")
 else:
     supabase = create_client(supabase_url, supabase_key)
     client = openai.OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=api_key,
         default_headers={
-            "HTTP-Referer": "https://quizia-app.vercel.app", 
+            "HTTP-Referer": "https://quizia-app.vercel.app",  # Substitua pelo URL do seu app
             "X-Title": "Quizia App",
         },
     )
@@ -58,13 +58,12 @@ def extract_text_from_pdf(uploaded_file):
         st.error(f"Erro ao processar o PDF: {e}")
         return None
 
-def generate_quiz_from_content(text, estilo, dificuldade):
+def generate_quiz_from_content(text, estilo, dificuldade, num_questoes):
     """Gera um quiz em formato JSON estruturado."""
     if not client:
         st.error("Cliente da API não configurado.")
         return None
 
-    # Lógica para opções aleatórias
     estilos_disponiveis = ["Múltipla escolha", "Verdadeiro/Falso"]
     if estilo == "Aleatório":
         estilo = random.choice(estilos_disponiveis)
@@ -73,66 +72,66 @@ def generate_quiz_from_content(text, estilo, dificuldade):
     if dificuldade == "Aleatório":
         dificuldade = random.choice(niveis_disponiveis)
 
-    # Instrução de formato JSON
     json_format_instruction = """
     Responda estritamente no seguinte formato JSON, sem nenhum texto ou formatação adicional fora do JSON.
-    O JSON deve ser uma lista de objetos, onde cada objeto representa uma pergunta e contém:
+    O JSON deve conter um único objeto com a chave "questoes", que contém uma lista de objetos de pergunta.
+    Cada objeto de pergunta deve conter:
     - "pergunta": (string) O texto da pergunta.
     - "estilo": (string) "multipla_escolha" ou "verdadeiro_falso".
-    - "opcoes": (list of strings) Uma lista com as opções. Para 'verdadeiro_falso', a lista deve ser ["Verdadeiro", "Falso"].
-    - "resposta_correta": (string) O texto exato de uma das opções que é a resposta correta.
-    - "justificativa": (string) Uma explicação clara do porquê a resposta está correta e as outras incorretas.
-
-    Exemplo para Múltipla Escolha:
-    [
-      {
-        "pergunta": "Qual a cor do céu em um dia claro?",
-        "estilo": "multipla_escolha",
-        "opcoes": ["Verde", "Azul", "Vermelho", "Amarelo"],
-        "resposta_correta": "Azul",
-        "justificativa": "A dispersão de Rayleigh da luz solar na atmosfera faz com que o céu pareça azul."
-      }
-    ]
+    - "opcoes": (list of strings) Uma lista com as opções. Para 'verdadeiro_falso', use ["Verdadeiro", "Falso"].
+    - "resposta_correta": (string) O texto exato da resposta correta.
+    - "justificativa": (string) Uma explicação clara do porquê a resposta está correta.
     """
 
-    # Prompt final para a IA
     prompt_final = (
-        f"Crie 5 perguntas no estilo '{estilo}' com nível de dificuldade '{dificuldade}', baseadas no texto fornecido. "
+        f"Crie {num_questoes} perguntas no estilo '{estilo}' com nível de dificuldade '{dificuldade}', baseadas no texto fornecido. "
         f"{json_format_instruction}\n\n"
         f"Texto de referência:\n{text[:8000]}"
     )
 
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-4o",  # Modelo forte em seguir instruções de formato
+            model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": prompt_final}],
             response_format={"type": "json_object"},
             timeout=180
         )
-        # O modelo pode retornar o JSON dentro de uma chave, precisamos extrair a lista.
         response_content = completion.choices[0].message.content
+        if not response_content:
+            st.error("A resposta da IA foi vazia. Tente um PDF ou modelo diferente.")
+            return None
+
         response_json = json.loads(response_content)
-        # Supondo que a lista de questões está na chave 'questoes' ou similar, ou é o objeto raiz
-        quiz_data = response_json.get("questoes", response_json)
+        quiz_data = response_json.get("questoes")
+        
+        if not quiz_data or not isinstance(quiz_data, list):
+             st.error(f"A IA retornou um JSON, mas não no formato esperado (lista de 'questoes'). Tente novamente.")
+             return None
+
         return quiz_data
+        
+    except json.JSONDecodeError:
+        st.error(f"Erro ao decodificar o JSON da IA. Resposta recebida: {response_content}")
+        return None
     except Exception as e:
-        st.error(f"Erro ao gerar ou processar a resposta da IA: {e}")
-        st.error(f"Resposta recebida da IA (pode não ser JSON válido): {response_content}")
+        st.error(f"Erro inesperado ao chamar a API: {e}")
         return None
 
 # ======================
 # BANCO DE ERROS (Supabase)
 # ======================
-def salvar_erro(pergunta, correta, usuario, estilo):
+def salvar_erro(pergunta, correta, usuario, estilo, opcoes):
     if not supabase: return
     try:
+        opcoes_json = json.dumps(opcoes)
         supabase.table("erros").insert({
             "pergunta": pergunta,
             "resposta_correta": correta,
             "resposta_usuario": usuario,
-            "estilo": estilo
+            "estilo": estilo,
+            "opcoes": opcoes_json
         }).execute()
-        st.toast("Ops! Erro registrado para sua revisão.", icon="💔")
+        st.toast("Ops! Erro registado para sua revisão.", icon="💔")
     except Exception as e:
         st.error(f"Erro ao salvar no Supabase: {e}")
 
@@ -149,15 +148,13 @@ def listar_erros():
 # INTERFACE STREAMLIT
 # ======================
 
-# --- Menu Lateral ---
+st.sidebar.title("Navegação")
 menu = st.sidebar.radio("Menu", ["Gerar Questões", "Revisar Erros", "Flashcards"])
 
-# --- Página: Gerar Questões ---
 if menu == "Gerar Questões":
     st.title("📘 Quizia - Quiz Interativo com IA")
-    st.markdown("Envie um PDF, escolha o nível e o estilo, e teste seus conhecimentos!")
+    st.markdown("Envie um PDF, personalize seu quiz e teste seus conhecimentos!")
 
-    # Inicialização do estado da sessão
     if "quiz_data" not in st.session_state:
         st.session_state.quiz_data = None
         st.session_state.current_question = 0
@@ -166,27 +163,27 @@ if menu == "Gerar Questões":
 
     with st.container(border=True):
         uploaded_file = st.file_uploader("1. Selecione o arquivo PDF", type=["pdf"])
-        dificuldade = st.selectbox("2. Escolha o Nível de Dificuldade:", ["Fácil", "Médio", "Difícil", "Aleatório"])
-        estilo = st.selectbox("3. Escolha o Estilo das Questões:", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            num_questoes = st.number_input("2. Nº de Questões", min_value=1, max_value=10, value=5)
+        with col2:
+            dificuldade = st.selectbox("3. Dificuldade", ["Fácil", "Médio", "Difícil", "Aleatório"])
+        with col3:
+            estilo = st.selectbox("4. Estilo", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
         
         if st.button("Gerar Quiz!", type="primary", disabled=(not client or not uploaded_file)):
-            # Reseta o estado do quiz anterior
             st.session_state.quiz_data = None
-            st.session_state.current_question = 0
-            st.session_state.score = 0
-            st.session_state.answered = False
-
             pdf_text = extract_text_from_pdf(uploaded_file)
             if pdf_text:
-                with st.spinner("🧠 A IA está a criar um quiz desafiador para você..."):
-                    quiz_data = generate_quiz_from_content(pdf_text, estilo, dificuldade)
-                    if quiz_data and isinstance(quiz_data, list):
+                with st.spinner("🧠 A IA está a criar um quiz desafiador para si..."):
+                    quiz_data = generate_quiz_from_content(pdf_text, estilo, dificuldade, num_questoes)
+                    if quiz_data:
                         st.session_state.quiz_data = quiz_data
-                        st.rerun() # Força o recarregamento para exibir a primeira questão
-                    else:
-                        st.error("A IA não conseguiu gerar o quiz no formato esperado. Tente novamente.")
+                        st.session_state.current_question = 0
+                        st.session_state.score = 0
+                        st.session_state.answered = False
+                        st.rerun()
 
-    # --- Lógica de Exibição do Quiz ---
     if st.session_state.quiz_data:
         st.markdown("---")
         st.subheader(f"Pontuação: {st.session_state.score}/{len(st.session_state.quiz_data)}")
@@ -196,28 +193,29 @@ if menu == "Gerar Questões":
         
         if idx < total_questions:
             question = st.session_state.quiz_data[idx]
-
             st.markdown(f"#### Pergunta {idx + 1}/{total_questions}")
             
             with st.form(key=f"question_form_{idx}"):
                 user_answer = st.radio(
                     label=question["pergunta"],
                     options=question["opcoes"],
-                    index=None # Começa sem nenhuma opção selecionada
+                    index=None
                 )
                 submitted = st.form_submit_button("Responder")
 
                 if submitted:
-                    st.session_state.answered = True
-                    is_correct = (user_answer == question["resposta_correta"])
-
-                    if is_correct:
-                        st.session_state.score += 1
-                        st.success(f"🎉 Correto! {question['justificativa']}")
+                    if user_answer is None:
+                        st.warning("Por favor, selecione uma resposta antes de continuar.")
                     else:
-                        st.error(f"❌ Incorreto. A resposta certa era **{question['resposta_correta']}**. {question['justificativa']}")
-                        # Salva o erro no Supabase
-                        salvar_erro(question["pergunta"], question["resposta_correta"], user_answer, question["estilo"])
+                        st.session_state.answered = True
+                        is_correct = (user_answer == question["resposta_correta"])
+
+                        if is_correct:
+                            st.session_state.score += 1
+                            st.success(f"🎉 Correto! {question['justificativa']}")
+                        else:
+                            st.error(f"❌ Incorreto. A resposta certa era **{question['resposta_correta']}**. {question['justificativa']}")
+                            salvar_erro(question["pergunta"], question["resposta_correta"], user_answer, question["estilo"], question["opcoes"])
             
             if st.session_state.answered:
                 if st.button("Próxima Pergunta ➡️"):
@@ -231,8 +229,6 @@ if menu == "Gerar Questões":
                 st.session_state.quiz_data = None
                 st.rerun()
 
-
-# --- Página: Revisar Erros ---
 elif menu == "Revisar Erros":
     st.title("📂 Histórico de Erros")
     st.markdown("Revise as questões que você errou para fortalecer seu aprendizado.")
@@ -247,14 +243,13 @@ elif menu == "Revisar Erros":
     else:
         st.info("Você ainda não registrou nenhum erro. Continue praticando!")
 
-# --- Página: Flashcards ---
 elif menu == "Flashcards":
     st.title("🃏 Modo Flashcards")
     st.markdown("Teste seu conhecimento com base nas questões que você errou anteriormente.")
     
     erros = listar_erros()
     if not erros:
-        st.info("Nenhum erro registrado para usar no modo flashcard.")
+        st.info("Nenhum erro registado para usar no modo flashcard.")
     else:
         if 'current_card' not in st.session_state or st.button("Próximo Card 🔄"):
             st.session_state.current_card = random.choice(erros)
