@@ -7,7 +7,7 @@ import random
 import os
 from dotenv import load_dotenv
 import json
-import math
+import time
 
 # ======================
 # CONFIGURAÇÃO INICIAL
@@ -38,15 +38,24 @@ else:
     st.sidebar.success("✅ Conectado às APIs!", icon="🚀")
 
 # ======================
-# FUNÇÕES CORE (NOVAS E MODIFICADAS)
+# FUNÇÕES CORE
 # ======================
 
 def extract_text_from_pdf(uploaded_file):
-    # ... (sem alterações)
-    pass
+    text = ""
+    try:
+        uploaded_file.seek(0)
+        reader = PdfReader(uploaded_file)
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted
+        return text
+    except Exception as e:
+        st.error(f"Erro ao processar o PDF: {e}")
+        return None
 
 def chunk_text(text, chunk_size=8000, overlap=400):
-    """Divide o texto em pedaços (chunks) com sobreposição."""
     if not text: return []
     chunks = []
     start = 0
@@ -56,15 +65,48 @@ def chunk_text(text, chunk_size=8000, overlap=400):
         start += chunk_size - overlap
     return chunks
 
-def generate_questions_for_chunk(text_chunk, estilo, dificuldade, num_questoes_por_chunk):
-    # ... (Função 'generate_quiz_from_content' adaptada)
-    pass
+def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
+    if not client: return None
+
+    estilos_disponiveis = ["Múltipla escolha", "Verdadeiro/Falso"]
+    if estilo == "Aleatório":
+        estilo = random.choice(estilos_disponiveis)
+    
+    niveis_disponiveis = ["Fácil", "Médio", "Difícil"]
+    if dificuldade == "Aleatório":
+        dificuldade = random.choice(niveis_disponiveis)
+
+    json_format_instruction = """
+    Responda estritamente no seguinte formato JSON, contendo um objeto com a chave "questoes", que contém uma lista de objetos de pergunta.
+    Cada objeto de pergunta deve ter: "pergunta", "estilo", "opcoes", "resposta_correta", e "justificativa".
+    """
+
+    prompt_final = (
+        f"Analise o texto fornecido e crie quantas perguntas forem necessárias para cobrir exaustivamente todos os conceitos e informações importantes. "
+        f"As perguntas devem ser no estilo '{estilo}' com nível de dificuldade '{dificuldade}'. "
+        f"{json_format_instruction}\n\n"
+        f"Texto de referência:\n{text_chunk}"
+    )
+
+    try:
+        completion = client.chat.completions.create(
+            model="deepseek/deepseek-chat-v3.1:free",
+            messages=[{"role": "user", "content": prompt_final}],
+            response_format={"type": "json_object"},
+            timeout=180
+        )
+        response_content = completion.choices[0].message.content
+        if not response_content: return None
+        response_json = json.loads(response_content)
+        return response_json.get("questoes")
+    except Exception as e:
+        print(f"Erro ao chamar a API para um chunk: {e}")
+        return None
 
 # ======================
-# FUNÇÕES DE BANCO DE DADOS (NOVAS)
+# FUNÇÕES DE BANCO DE DADOS
 # ======================
 def create_quiz_entry(pdf_name):
-    """Cria uma nova entrada para o quiz na tabela 'quizzes' e retorna o ID."""
     if not supabase: return None
     try:
         response = supabase.table("quizzes").insert({"pdf_nome": pdf_name}).execute()
@@ -74,7 +116,6 @@ def create_quiz_entry(pdf_name):
         return None
 
 def save_questions_to_db(quiz_id, questions_data):
-    """Salva uma lista de questões no DB, associadas a um quiz_id."""
     if not supabase or not questions_data: return
     try:
         for question in questions_data:
@@ -84,16 +125,14 @@ def save_questions_to_db(quiz_id, questions_data):
         st.error(f"Erro ao salvar questões no DB: {e}")
 
 def get_all_quizzes():
-    """Busca todos os quizzes gerados."""
     if not supabase: return []
     try:
-        return supabase.table("quizzes").select("*").order("created_at", desc=True).execute().data
+        return supabase.table("quizzes").select("id, pdf_nome, created_at").order("created_at", desc=True).execute().data
     except Exception as e:
         st.error(f"Erro ao buscar quizzes: {e}")
         return []
 
 def get_questions_for_quiz(quiz_id):
-    """Busca todas as questões de um quiz específico."""
     if not supabase: return []
     try:
         return supabase.table("questoes").select("*").eq("quiz_id", quiz_id).execute().data
@@ -101,13 +140,34 @@ def get_questions_for_quiz(quiz_id):
         st.error(f"Erro ao buscar questões do quiz: {e}")
         return []
 
-# ... (Funções 'salvar_erro' e 'listar_erros' permanecem as mesmas) ...
+def salvar_erro(pergunta, correta, usuario, estilo, opcoes, justificativa):
+    if not supabase: return
+    try:
+        opcoes_json = json.dumps(opcoes)
+        supabase.table("erros").insert({
+            "pergunta": pergunta,
+            "resposta_correta": correta,
+            "resposta_usuario": usuario,
+            "estilo": estilo,
+            "opcoes": opcoes_json,
+            "justificativa": justificativa
+        }).execute()
+        st.toast("Ops! Erro registado para sua revisão.", icon="💔")
+    except Exception as e:
+        st.error(f"Erro ao salvar no Supabase: {e}")
+
+def listar_erros():
+    if not supabase: return []
+    try:
+        return supabase.table("erros").select("*").order("created_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Erro ao listar erros do Supabase: {e}")
+        return []
 
 # ======================
 # INTERFACE STREAMLIT
 # ======================
 st.sidebar.title("Navegação")
-# <<< NOVA OPÇÃO DE MENU >>>
 menu = st.sidebar.radio("Menu", ["Gerar Novo Quiz", "Meus Quizzes", "Revisar Erros", "Flashcards"])
 
 if menu == "Gerar Novo Quiz":
@@ -116,44 +176,52 @@ if menu == "Gerar Novo Quiz":
 
     with st.container(border=True):
         uploaded_file = st.file_uploader("1. Selecione o arquivo PDF", type=["pdf"])
-        col1, col2, col3 = st.columns(3)
+        col1, col2 = st.columns(2)
         with col1:
-            num_questoes_total = st.number_input("2. Nº Total de Questões (Aprox.)", min_value=5, max_value=50, value=10)
+            dificuldade = st.selectbox("2. Dificuldade das Questões", ["Fácil", "Médio", "Difícil", "Aleatório"])
         with col2:
-            dificuldade = st.selectbox("3. Dificuldade", ["Fácil", "Médio", "Difícil", "Aleatório"])
-        with col3:
-            estilo = st.selectbox("4. Estilo", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
+            estilo = st.selectbox("3. Estilo das Questões", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
         
         if st.button("Analisar e Gerar Quiz Completo", type="primary", disabled=(not client or not uploaded_file)):
-            pdf_text = extract_text_from_pdf(uploaded_file)
-            if pdf_text:
-                chunks = chunk_text(pdf_text)
-                num_chunks = len(chunks)
-                st.info(f"O PDF foi dividido em {num_chunks} partes para análise.")
-                
-                # Cria a entrada do quiz no DB
-                quiz_id = create_quiz_entry(uploaded_file.name)
-                if not quiz_id:
-                    st.error("Falha ao iniciar o quiz no banco de dados. Tente novamente.")
-                else:
-                    progress_bar = st.progress(0, text="A gerar questões para a Parte 1...")
-                    num_questoes_por_chunk = math.ceil(num_questoes_total / num_chunks)
+            with st.status("A iniciar o processo de geração do quiz...", expanded=True) as status:
+                try:
+                    status.update(label="Passo 1/5: A extrair texto do PDF...", state="running")
+                    pdf_text = extract_text_from_pdf(uploaded_file)
+                    if not pdf_text:
+                        status.update(label="Falha ao extrair texto do PDF.", state="error", expanded=False)
+                        st.stop()
                     
+                    status.update(label="Passo 2/5: A dividir o conteúdo em partes...", state="running")
+                    chunks = chunk_text(pdf_text)
+                    num_chunks = len(chunks)
+                    st.write(f"Conteúdo dividido em {num_chunks} partes para análise.")
+                    
+                    status.update(label="Passo 3/5: A criar registo do quiz no banco de dados...", state="running")
+                    quiz_id = create_quiz_entry(uploaded_file.name)
+                    if not quiz_id:
+                        status.update(label="Falha ao registar o quiz no banco de dados.", state="error", expanded=False)
+                        st.stop()
+                    
+                    status.update(label=f"Passo 4/5: A gerar questões com a IA (0/{num_chunks})...", state="running")
                     total_questions_generated = 0
-                    all_questions = []
-
                     for i, chunk in enumerate(chunks):
-                        progress_bar.progress((i + 1) / num_chunks, text=f"A gerar questões para a Parte {i + 1}/{num_chunks}...")
-                        questions_data = generate_questions_for_chunk(chunk, estilo, dificuldade, num_questoes_por_chunk)
+                        questions_data = generate_questions_for_chunk(chunk, estilo, dificuldade)
                         if questions_data:
                             save_questions_to_db(quiz_id, questions_data)
                             total_questions_generated += len(questions_data)
+                        status.update(label=f"Passo 4/5: A gerar questões com a IA ({i + 1}/{num_chunks})... {total_questions_generated} questões criadas.", state="running")
+                        time.sleep(1)
                     
-                    progress_bar.empty()
-                    st.success(f"🎉 Quiz completo gerado com sucesso! Foram criadas {total_questions_generated} questões.")
+                    status.update(label=f"Passo 5/5: A finalizar...", state="running")
+                    time.sleep(2)
+                    status.update(label=f"Quiz gerado com sucesso! Foram criadas {total_questions_generated} questões.", state="complete", expanded=False)
+                    
+                    st.success(f"🎉 Quiz '{uploaded_file.name}' está pronto!")
                     st.info('Vá para a aba "Meus Quizzes" para começar a resolver.')
 
-# <<< PÁGINA COMPLETAMENTE NOVA >>>
+                except Exception as e:
+                    status.update(label=f"Ocorreu um erro: {e}", state="error")
+
 elif menu == "Meus Quizzes":
     st.title("📚 Meus Quizzes Gerados")
     st.markdown("Selecione um quiz da lista abaixo para começar a resolver.")
@@ -162,22 +230,55 @@ elif menu == "Meus Quizzes":
     if not quizzes:
         st.info("Nenhum quiz foi gerado ainda. Vá para 'Gerar Novo Quiz' para começar.")
     else:
-        # Lógica para selecionar e resolver um quiz
-        quiz_id_selecionado = st.selectbox("Selecione o Quiz:", options=[q['id'] for q in quizzes], format_func=lambda q_id: next((q['pdf_nome'] for q in quizzes if q['id'] == q_id), "Desconhecido"))
+        quiz_options = {q['id']: f"{q['pdf_nome']} (criado em {q['created_at'][:10]})" for q in quizzes}
+        quiz_id_selecionado = st.selectbox("Selecione o Quiz:", options=quiz_options.keys(), format_func=lambda q_id: quiz_options[q_id])
 
-        if quiz_id_selecionado:
-            if "quiz_selecionado" not in st.session_state or st.session_state.quiz_selecionado != quiz_id_selecionado:
-                st.session_state.quiz_selecionado = quiz_id_selecionado
-                st.session_state.quiz_data = get_questions_for_quiz(quiz_id_selecionado)
-                st.session_state.current_question = 0
-                st.session_state.score = 0
-                st.session_state.answered = False
-                st.rerun()
+        if "quiz_selecionado" not in st.session_state or st.session_state.quiz_selecionado != quiz_id_selecionado:
+            st.session_state.quiz_selecionado = quiz_id_selecionado
+            st.session_state.quiz_data = get_questions_for_quiz(quiz_id_selecionado)
+            st.session_state.current_question = 0
+            st.session_state.score = 0
+            st.session_state.answered = False
+            st.rerun()
 
-            # A lógica de resolução do quiz que já tínhamos, agora é usada aqui
-            if st.session_state.get("quiz_data"):
-                # ... (cole aqui a lógica do quiz interativo da versão anterior) ...
-                st.markdown("---")
-                # (O código é o mesmo da sua versão anterior, que mostra a pontuação, as perguntas, os botões, etc.)
+        if st.session_state.get("quiz_data"):
+            st.markdown("---")
+            st.subheader(f"Pontuação: {st.session_state.score}/{len(st.session_state.quiz_data)}")
+            
+            idx = st.session_state.current_question
+            total_questions = len(st.session_state.quiz_data)
+            
+            if idx < total_questions:
+                question = st.session_state.quiz_data[idx]
+                st.markdown(f"#### Pergunta {idx + 1}/{total_questions}")
+                
+                with st.form(key=f"question_form_{idx}"):
+                    user_answer = st.radio(
+                        label=question["pergunta"],
+                        options=question["opcoes"],
+                        index=None
+                    )
+                    submitted = st.form_submit_button("Responder")
 
-# ... (As páginas "Revisar Erros" e "Flashcards" permanecem iguais) ...
+                    if submitted:
+                        if user_answer is None:
+                            st.warning("Por favor, selecione uma resposta antes de continuar.")
+                        else:
+                            st.session_state.answered = True
+                            is_correct = (user_answer == question["resposta_correta"])
+
+                            if is_correct:
+                                st.session_state.score += 1
+                                st.success(f"🎉 Correto! {question['justificativa']}")
+                            else:
+                                st.error(f"❌ Incorreto. A resposta certa era **{question['resposta_correta']}**. {question['justificativa']}")
+                                salvar_erro(question["pergunta"], question["resposta_correta"], user_answer, question["estilo"], question["opcoes"], question["justificativa"])
+                
+                if st.session_state.answered:
+                    if st.button("Próxima Pergunta ➡️"):
+                        st.session_state.current_question += 1
+                        st.session_state.answered = False
+                        st.rerun()
+            else:
+                st.balloons()
+                st.success(f"🎉 Quiz Concluído! Sua pontuação final é: {st.session_state.score}/{total_
