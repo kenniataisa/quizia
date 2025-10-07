@@ -128,7 +128,28 @@ def delete_quiz(quiz_id):
     except Exception as e:
         st.error(f"Erro ao apagar o quiz: {e}"); return False
 
-# ... (suas outras funções de salvar erro, listar erros, etc.)
+def salvar_erro(pergunta, correta, usuario, estilo, opcoes, justificativa):
+    if not supabase: return
+    try:
+        opcoes_json = json.dumps(opcoes, ensure_ascii=False)
+        supabase.table("erros").insert({
+            "pergunta": pergunta,
+            "resposta_correta": correta,
+            "resposta_usuario": usuario,
+            "estilo": estilo,
+            "opcoes": opcoes_json,
+            "justificativa": justificativa
+        }).execute()
+        st.toast("Ops! Erro registado para sua revisão.", icon="💔")
+    except Exception as e:
+        st.error(f"Erro ao salvar erro no Supabase: {e}")
+
+def listar_erros():
+    if not supabase: return []
+    try:
+        return supabase.table("erros").select("*").order("created_at", desc=True).execute().data
+    except Exception as e:
+        st.error(f"Erro ao listar erros do Supabase: {e}"); return []
 
 # ======================
 # INTERFACE STREAMLIT
@@ -137,7 +158,6 @@ st.sidebar.title("Navegação")
 menu = st.sidebar.radio("Menu", ["Gerar Novo Quiz", "Todos os Quizzes", "Revisar Erros", "Flashcards"])
 
 if menu == "Gerar Novo Quiz":
-    # ... (CÓDIGO PARA GERAR QUIZ - SEM ALTERAÇÕES)
     st.title("➕ Gerar Novo Quiz a partir de um PDF")
     st.markdown("O conteúdo do PDF será processado para criar um quiz completo.")
 
@@ -149,8 +169,54 @@ if menu == "Gerar Novo Quiz":
         with col2: estilo = st.selectbox("4. Estilo", ["Múltipla escolha", "Verdadeiro/Falso", "Aleatório"])
         
         if st.button("Analisar e Gerar Quiz", type="primary", disabled=(not all([client, uploaded_file, quiz_name]))):
-            # ... (LÓGICA DE GERAÇÃO OTIMIZADA)
-            pass # Cole a lógica da sua última versão aqui
+            # --- LÓGICA DE GERAÇÃO QUE ESTAVA FALTANDO ---
+            with st.status("A iniciar o processo de geração do quiz...", expanded=True) as status:
+                try:
+                    status.update(label="Passo 1/5: Extraindo texto do PDF...", state="running")
+                    pdf_text = extract_text_from_pdf(uploaded_file)
+                    if not pdf_text:
+                        status.update(label="Falha ao extrair texto.", state="error", expanded=False); st.stop()
+                    
+                    status.update(label="Passo 2/5: Dividindo o conteúdo...", state="running")
+                    chunks = chunk_text(pdf_text)
+                    num_chunks = len(chunks)
+                    st.write(f"Conteúdo dividido em {num_chunks} partes para análise.")
+                    
+                    status.update(label="Passo 3/5: Criando registo do quiz...", state="running")
+                    quiz_id = create_quiz_entry(quiz_name)
+                    if not quiz_id:
+                        status.update(label="Falha ao registar o quiz.", state="error", expanded=False); st.stop()
+                    
+                    status.update(label=f"Passo 4/5: Gerando questões com a IA (0/{num_chunks})...", state="running")
+                    all_generated_questions = []
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future_to_chunk = {executor.submit(generate_questions_for_chunk, chunk, estilo, dificuldade): chunk for chunk in chunks}
+                        for i, future in enumerate(concurrent.futures.as_completed(future_to_chunk)):
+                            try:
+                                questions_data = future.result()
+                                if questions_data:
+                                    all_generated_questions.extend(questions_data)
+                                status.update(
+                                    label=f"Passo 4/5: Gerando questões... ({i + 1}/{num_chunks}) partes processadas. {len(all_generated_questions)} questões criadas.",
+                                    state="running"
+                                )
+                            except Exception as exc:
+                                st.warning(f"Um chunk do PDF gerou uma exceção: {exc}")
+
+                    status.update(label="Passo 5/5: Salvando questões no banco de dados...", state="running")
+                    if all_generated_questions:
+                        success = save_questions_to_db(quiz_id, all_generated_questions)
+                        if not success:
+                           status.update(label="Falha ao salvar questões no banco de dados.", state="error", expanded=False); st.stop()
+                    
+                    total_questions_generated = len(all_generated_questions)
+                    status.update(label=f"Quiz gerado! Foram criadas {total_questions_generated} questões.", state="complete", expanded=False)
+                    
+                    st.success(f"🎉 Quiz '{quiz_name}' está pronto!")
+                    st.info('Vá para a aba "Todos os Quizzes" para começar a resolver.')
+
+                except Exception as e:
+                    status.update(label=f"Ocorreu um erro geral: {e}", state="error")
 
 elif menu == "Todos os Quizzes":
     st.title("📚 Todos os Quizzes Gerados")
@@ -163,7 +229,6 @@ elif menu == "Todos os Quizzes":
         quiz_options = {q['id']: f"{q.get('pdf_nome', 'Quiz sem nome')} (criado em {q.get('created_at', '')[:10]})" for q in quizzes}
         quiz_id_selecionado = st.selectbox("Selecione o Quiz:", options=list(quiz_options.keys()), format_func=lambda q_id: quiz_options.get(q_id, "Opção inválida"), index=None, placeholder="Escolha um quiz...")
 
-        # --- NOVA LÓGICA DE DELETE ---
         if quiz_id_selecionado:
             if "confirm_delete" not in st.session_state:
                 st.session_state.confirm_delete = False
@@ -180,6 +245,9 @@ elif menu == "Todos os Quizzes":
                     if delete_quiz(quiz_id_selecionado):
                         st.success("Quiz apagado com sucesso!")
                         st.session_state.confirm_delete = False
+                        # Limpar o estado para evitar que o quiz apagado continue selecionado
+                        st.session_state.quiz_id_selecionado = None
+                        st.session_state.quiz_data = None
                         time.sleep(1)
                         st.rerun()
                     else:
@@ -188,8 +256,7 @@ elif menu == "Todos os Quizzes":
                     st.session_state.confirm_delete = False
                     st.rerun()
             
-            # --- LÓGICA DE EXIBIÇÃO DO QUIZ ---
-            if st.session_state.get("confirm_delete") == False:
+            if not st.session_state.confirm_delete:
                 if "quiz_id_selecionado" not in st.session_state or st.session_state.quiz_id_selecionado != quiz_id_selecionado:
                     st.session_state.quiz_id_selecionado = quiz_id_selecionado
                     st.session_state.quiz_data = get_questions_for_quiz(quiz_id_selecionado)
@@ -222,6 +289,8 @@ elif menu == "Todos os Quizzes":
                                         st.success(f"🎉 Correto! {question.get('justificativa', '')}")
                                     else:
                                         st.error(f"❌ Incorreto. Resposta certa: **{question['resposta_correta']}**. {question.get('justificativa', '')}")
+                                        # Chamada para salvar erro, se a função existir
+                                        # salvar_erro(...)
                         
                         if st.session_state.get("answered"):
                             if st.button("Próxima Pergunta ➡️"):
@@ -231,13 +300,21 @@ elif menu == "Todos os Quizzes":
                     else:
                         st.balloons()
                         st.success(f"🎉 Quiz Concluído! Pontuação final: {st.session_state.score}/{total_questions}")
-                elif st.session_state.quiz_id_selecionado is not None:
-                     st.warning("Este quiz não contém nenhuma questão. Pode ter ocorrido um erro durante a geração.")
+                
+                elif quiz_id_selecionado is not None:
+                     st.warning("Este quiz não contém nenhuma questão. Pode ter ocorrido um erro durante a geração ou o tipo de dado da coluna 'quiz_id' pode estar incorreto.")
 
 elif menu == "Revisar Erros":
-    # ... (Seu código para revisar erros)
-    pass
-
+    st.title("🧐 Revise Seus Erros")
+    erros = listar_erros()
+    if not erros:
+        st.info("Nenhuma questão foi registrada como errada ainda.")
+    else:
+        for erro in erros:
+            with st.container(border=True):
+                st.markdown(f"**Pergunta:** {erro['pergunta']}")
+                # Adicione mais detalhes se desejar
+    
 elif menu == "Flashcards":
     st.title("🗂️ Flashcards para Estudo")
     st.info("Funcionalidade em desenvolvimento.")
