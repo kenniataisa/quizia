@@ -77,7 +77,6 @@ def get_json_format_instruction(estilo):
         "coluna_a" and "coluna_b" must be lists of strings.
         "associacoes_corretas" must be a dictionary mapping each item from "coluna_a" to its correct corresponding item in "coluna_b".
         """
-    # Padrão: Múltipla Escolha
     return """
     Each question object must have these keys: "pergunta", "estilo", "opcoes", "resposta_correta", and "justificativa".
     """
@@ -95,7 +94,6 @@ def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
     
     prompt_final = (
         f"You are an expert educator. Analyze the provided text and create insightful, contextualized questions that require understanding and synthesis of concepts, not just rote memorization. "
-        f"If possible, use your external knowledge to create relevant analogies or examples. "
         f"The questions must be in the '{estilo}' style with a '{dificuldade}' difficulty level. "
         f"You must respond strictly in a JSON format containing an object with the key 'questoes', which holds a list of question objects. "
         f"{json_format}"
@@ -104,6 +102,7 @@ def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
     )
     try:
         completion = client.chat.completions.create(
+            # MODELO ALTERADO DE VOLTA PARA O DEEPSEEK
             model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": prompt_final}],
             response_format={"type": "json_object"},
@@ -134,7 +133,8 @@ def evaluate_open_answer_with_ai(question, ideal_answer, user_answer):
     """
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-4o",
+            # MODELO ALTERADO DE VOLTA PARA O DEEPSEEK
+            model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"},
             timeout=120
@@ -148,10 +148,19 @@ def evaluate_open_answer_with_ai(question, ideal_answer, user_answer):
 # ======================
 # FUNÇÕES DE BANCO DE DADOS (APENAS PARA ERROS)
 # ======================
-def salvar_erro(data):
+def salvar_erro(question_data, user_answer):
     if not supabase: return
     try:
-        supabase.table("erros").insert(data).execute()
+        # Prepara um dicionário com os dados do erro para salvar
+        error_log = {
+            "pergunta": question_data.get("pergunta") or question_data.get("texto_base"),
+            "resposta_correta": question_data.get("resposta_correta") or ", ".join(question_data.get("respostas_aceitaveis", [])),
+            "resposta_usuario": user_answer,
+            "estilo": question_data.get("estilo"),
+            "opcoes": json.dumps(question_data.get("opcoes", []), ensure_ascii=False),
+            "justificativa": question_data.get("justificativa")
+        }
+        supabase.table("erros").insert(error_log).execute()
         st.toast("Ops! Erro registado para sua revisão.", icon="💔")
     except Exception as e:
         st.error(f"Erro ao salvar erro no Supabase: {e}")
@@ -221,16 +230,12 @@ if menu == "Gerar e Resolver Quiz":
         st.title("🧠 Quiz em Andamento")
         total_questions = len(st.session_state.quiz_data)
         idx = st.session_state.current_question
-        
-        # Pontuação total agora é baseada em 10 pontos por questão
         max_score = total_questions * 10
         st.subheader(f"Pontuação: {st.session_state.score:.1f} / {max_score}")
 
         if idx < total_questions:
             question = st.session_state.quiz_data[idx]
             estilo_q = question.get("estilo", "Múltipla Escolha")
-
-            # --- RENDERIZAÇÃO DINÂMICA POR ESTILO ---
 
             if estilo_q == 'Múltipla Escolha':
                 st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
@@ -244,7 +249,7 @@ if menu == "Gerar e Resolver Quiz":
                             st.session_state.score += 10
                         else:
                             st.error(f"❌ Incorreto. Resposta certa: **{question['resposta_correta']}**. {question.get('justificativa', '')}")
-                            # Adicionar salvar_erro aqui se desejar
+                            salvar_erro(question, user_answer) # SALVANDO O ERRO
             
             elif estilo_q == 'Aberta':
                 st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
@@ -258,6 +263,7 @@ if menu == "Gerar e Resolver Quiz":
                         st.session_state.last_evaluation = evaluation
                         nota = evaluation.get("nota", 0)
                         st.session_state.score += nota
+                        if nota < 7: salvar_erro({"pergunta": question.get("pergunta"), "resposta_correta": question.get("resposta_ideal")}, user_answer)
                         if nota >= 7: st.success(f"Ótima resposta! Nota: {nota}/10")
                         elif nota >= 5: st.warning(f"Resposta razoável. Nota: {nota}/10")
                         else: st.error(f"Resposta precisa de melhorias. Nota: {nota}/10")
@@ -278,6 +284,7 @@ if menu == "Gerar e Resolver Quiz":
                             st.session_state.score += 10
                         else:
                             st.error(f"❌ Incorreto. Respostas aceitáveis: **{', '.join(question['respostas_aceitaveis'])}**")
+                            salvar_erro(question, user_answer)
 
             elif estilo_q == 'Associar Colunas':
                 st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta_guia']}")
@@ -295,11 +302,12 @@ if menu == "Gerar e Resolver Quiz":
                     submitted = st.form_submit_button("Verificar Associações")
                     if submitted:
                         st.session_state.answered = True
-                        acertos = sum(1 for item_a, item_b in user_associations.items() if question['associacoes_corretas'].get(item_a) == item_b)
+                        acertos = sum(1 for item_a, item_b in user_associations.items() if question['associacoes_corretas'].get(item_a) == item_b and item_b is not None)
                         total_itens = len(question['coluna_a'])
                         st.session_state.score += (acertos / total_itens) * 10
                         st.info(f"Você acertou {acertos} de {total_itens} associações.")
                         if acertos < total_itens:
+                            salvar_erro({"pergunta": question.get("pergunta_guia"), "resposta_correta": json.dumps(question.get("associacoes_corretas"), ensure_ascii=False)}, json.dumps(user_associations, ensure_ascii=False))
                             with st.expander("Mostrar Gabarito"):
                                 for item_a, item_b_correto in question['associacoes_corretas'].items(): st.markdown(f"- **{item_a}** ➡️ **{item_b_correto}**")
 
