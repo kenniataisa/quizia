@@ -113,8 +113,9 @@ def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
         print(response_content)
         print("---------------------------")
         # ------------------------------------
-        if not response_content: return None
+    if not response_content: return None
         return json.loads(response_content).get("questoes")
+
     except Exception as e:
         print(f"Erro ao chamar a API de geração: {e}"); return None
 
