@@ -104,7 +104,7 @@ def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
     )
     try:
         completion = client.chat.completions.create(
-            model="openai/gpt-4o",
+            model="deepseek/deepseek-chat-v3.1:free",
             messages=[{"role": "user", "content": prompt_final}],
             response_format={"type": "json_object"},
             timeout=240
