@@ -203,3 +203,145 @@ def initialize_session():
 
 if 'quiz_started' not in st.session_state:
     initialize_session()
+
+# ======================
+# INTERFACE STREAMLIT
+# ======================
+st.sidebar.title("Quizia Pro")
+menu = st.sidebar.radio("Menu", ["Gerar e Resolver Quiz", "Revisar Erros", "Flashcards"])
+
+# ------------------ MENU GERAR QUIZ ------------------
+if menu == "Gerar e Resolver Quiz":
+    if not st.session_state.quiz_started:
+        st.title("➕ Gerar Novo Quiz a partir de um PDF")
+        st.markdown("O conteúdo do seu PDF será transformado em um quiz com diferentes tipos de questões.")
+        
+        with st.container(border=True):
+            uploaded_file = st.file_uploader("1. Selecione o arquivo PDF", type=["pdf"])
+            col1, col2 = st.columns(2)
+            with col1:
+                dificuldade = st.selectbox("2. Dificuldade", ["Fácil", "Médio", "Difícil", "Aleatório"])
+            with col2:
+                estilo = st.selectbox("3. Estilo", ["Aleatório", "Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas"])
+            
+            if st.button("Analisar e Gerar Quiz", type="primary", disabled=(not client or not uploaded_file)):
+                with st.status("Gerando seu quiz...", expanded=True) as status:
+                    status.update(label="Extraindo texto...", state="running")
+                    pdf_text = extract_text_from_pdf(uploaded_file)
+                    if not pdf_text:
+                        status.update(label="Falha ao extrair texto.", state="error")
+                        st.stop()
+                    
+                    status.update(label="Dividindo conteúdo...", state="running")
+                    chunks = chunk_text(pdf_text)
+                    
+                    status.update(label="Gerando questões com a IA...", state="running")
+                    all_generated_questions = []
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future_to_chunk = {
+                            executor.submit(generate_questions_for_chunk, chunk, estilo, dificuldade): chunk for chunk in chunks
+                        }
+                        for future in concurrent.futures.as_completed(future_to_chunk):
+                            questions_data = future.result()
+                            if questions_data:
+                                all_generated_questions.extend(questions_data)
+                    
+                    if not all_generated_questions:
+                        status.update(label="A IA não conseguiu gerar questões para este documento.", state="error")
+                        st.stop()
+
+                    st.session_state.quiz_data = all_generated_questions
+                    st.session_state.quiz_started = True
+                    st.rerun()
+
+    # Quando o quiz já foi iniciado
+    if st.session_state.quiz_started:
+        st.title("🧠 Quiz em Andamento")
+        total_questions = len(st.session_state.quiz_data)
+        idx = st.session_state.current_question
+        max_score = total_questions * 10
+        st.subheader(f"Pontuação: {st.session_state.score:.1f} / {max_score}")
+
+        if idx < total_questions:
+            question = st.session_state.quiz_data[idx]
+            estilo_q = question.get("estilo", "Múltipla Escolha")
+
+            if estilo_q == 'Múltipla Escolha':
+                st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
+                with st.form(key=f"form_multi_{idx}"):
+                    user_answer = st.radio("Opções:", options=question.get("opcoes", []), index=None)
+                    submitted = st.form_submit_button("Responder")
+                    if submitted and user_answer is not None:
+                        st.session_state.answered = True
+                        if user_answer == question["resposta_correta"]:
+                            st.success(f"🎉 Correto! {question.get('justificativa', '')}")
+                            st.session_state.score += 10
+                        else:
+                            st.error(f"❌ Incorreto. Resposta certa: **{question['resposta_correta']}**. {question.get('justificativa', '')}")
+                            salvar_erro(question, user_answer)
+
+            elif estilo_q == 'Aberta':
+                st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
+                with st.form(key=f"form_aberta_{idx}"):
+                    user_answer = st.text_area("Sua Resposta:", height=150)
+                    submitted = st.form_submit_button("Avaliar Resposta com IA")
+                    if submitted and user_answer:
+                        with st.spinner("Avaliando sua resposta..."):
+                            evaluation = evaluate_open_answer_with_ai(
+                                question['pergunta'],
+                                question['resposta_ideal'],
+                                user_answer
+                            )
+                        st.session_state.answered = True
+                        st.session_state.last_evaluation = evaluation
+                        nota = evaluation.get("nota", 0)
+                        st.session_state.score += nota
+                        if nota < 7:
+                            salvar_erro({
+                                "pergunta": question.get("pergunta"),
+                                "resposta_correta": question.get("resposta_ideal"),
+                                "estilo": "Aberta"
+                            }, user_answer)
+                        if nota >= 7:
+                            st.success(f"Ótima resposta! Nota: {nota}/10")
+                        elif nota >= 5:
+                            st.warning(f"Resposta razoável. Nota: {nota}/10")
+                        else:
+                            st.error(f"Resposta precisa de melhorias. Nota: {nota}/10")
+                        st.info(f"**Feedback da IA:** {evaluation.get('feedback', '')}")
+                        with st.expander("Ver gabarito completo"):
+                            st.info(f"{question['resposta_ideal']}")
+
+            if st.session_state.get("answered"):
+                if st.button("Próxima Pergunta ➡️"):
+                    st.session_state.current_question += 1
+                    st.session_state.answered = False
+                    st.session_state.last_evaluation = None
+                    st.rerun()
+        else:
+            st.balloons()
+            st.success(f"🎉 Quiz Concluído! Pontuação final: {st.session_state.score:.1f} / {max_score}")
+            if st.button("Gerar Novo Quiz"):
+                initialize_session()
+                st.rerun()
+
+# ------------------ MENU REVISAR ERROS ------------------
+elif menu == "Revisar Erros":
+    st.title("🧐 Revise Seus Erros")
+    st.markdown("Aqui estão as questões que você errou para que possa revisar e aprender.")
+    erros = listar_erros()
+    if not erros:
+        st.info("Você ainda não errou nenhuma questão. Parabéns!")
+    else:
+        for erro in erros:
+            with st.container(border=True):
+                st.markdown(f"**Pergunta:** {erro['pergunta']}")
+                st.markdown(f"**Sua resposta:** <span style='color:red;'>{erro['resposta_usuario']}</span>", unsafe_allow_html=True)
+                st.markdown(f"**Resposta correta:** <span style='color:green;'>{erro['resposta_correta']}</span>", unsafe_allow_html=True)
+                if erro.get('justificativa'):
+                    st.info(f"**Justificativa:** {erro['justificativa']}")
+
+# ------------------ MENU FLASHCARDS ------------------
+elif menu == "Flashcards":
+    st.title("🗂️ Flashcards para Estudo")
+    st.info("Funcionalidade em desenvolvimento.")
