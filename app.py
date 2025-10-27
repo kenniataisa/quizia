@@ -30,9 +30,8 @@ client = openai.OpenAI(
     default_headers={"HTTP-Referer": "https://quizia.app", "X-Title": "Quizia App"},
 )
 
-# --- MODELOS DE IA COM FALLBACK ---
-MODELO_PRIMARIO = "deepseek/deepseek-chat-v3.1:free"
-MODELO_SECUNDARIO = "qwen/qwen3-235b-a22b:free" # Modelo de reserva
+# --- MODELO ÚNICO DE IA ---
+MODELO_UNICO = "tngtech/deepseek-r1t2-chimera:free"
 
 # ======================
 # FUNÇÕES CORE (PDF, CHUNKS)
@@ -44,13 +43,16 @@ def extract_text_from_pdf(uploaded_file):
         reader = PdfReader(uploaded_file)
         for page in reader.pages:
             extracted = page.extract_text()
-            if extracted: text += extracted
+            if extracted:
+                text += extracted
         return text
     except Exception as e:
-        st.error(f"Erro ao processar o PDF: {e}"); return None
+        st.error(f"Erro ao processar o PDF: {e}")
+        return None
 
 def chunk_text(text, chunk_size=8000, overlap=400):
-    if not text: return []
+    if not text:
+        return []
     chunks = []
     start = 0
     while start < len(text):
@@ -60,7 +62,7 @@ def chunk_text(text, chunk_size=8000, overlap=400):
     return chunks
 
 # ======================
-# FUNÇÕES DE GERAÇÃO (IA) COM FALLBACK
+# FUNÇÕES DE GERAÇÃO (IA)
 # ======================
 def get_json_format_instruction(estilo):
     """Retorna a instrução de formato JSON correta para cada estilo de questão."""
@@ -86,13 +88,16 @@ def get_json_format_instruction(estilo):
     """
 
 def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
-    if not client: return None
-    
+    if not client:
+        return None
+
     estilos_disponiveis = ["Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas"]
-    if estilo == "Aleatório": estilo = random.choice(estilos_disponiveis)
+    if estilo == "Aleatório":
+        estilo = random.choice(estilos_disponiveis)
     
     niveis_disponiveis = ["Fácil", "Médio", "Difícil"]
-    if dificuldade == "Aleatório": dificuldade = random.choice(niveis_disponiveis)
+    if dificuldade == "Aleatório":
+        dificuldade = random.choice(niveis_disponiveis)
     
     json_format = get_json_format_instruction(estilo)
     
@@ -105,38 +110,27 @@ def generate_questions_for_chunk(text_chunk, estilo, dificuldade):
         f"Reference Text:\n{text_chunk}"
     )
 
-    modelos_a_tentar = [MODELO_PRIMARIO, MODELO_SECUNDARIO]
-    for modelo in modelos_a_tentar:
-        try:
-            print(f"--- Tentando gerar questões com o modelo: {modelo} ---")
-            completion = client.chat.completions.create(
-                model=modelo,
-                messages=[{"role": "user", "content": prompt_final}],
-                response_format={"type": "json_object"},
-                timeout=240
-            )
-            response_content = completion.choices[0].message.content
-            
-            if response_content:
-                questoes = json.loads(response_content).get("questoes")
-                if questoes:
-                    print(f"--- Sucesso com o modelo: {modelo} ---")
-                    return questoes
-            
-            print(f"--- Modelo {modelo} retornou resposta vazia ou malformada. ---")
-
-        except Exception as e:
-            print(f"--- ERRO ao chamar o modelo {modelo}: {e} ---")
-            continue
-    
-    print("--- Todos os modelos falharam em gerar questões. ---")
-    return None
+    try:
+        completion = client.chat.completions.create(
+            model=MODELO_UNICO,
+            messages=[{"role": "user", "content": prompt_final}],
+            response_format={"type": "json_object"},
+            timeout=240
+        )
+        response_content = completion.choices[0].message.content
+        if response_content:
+            questoes = json.loads(response_content).get("questoes")
+            return questoes
+    except Exception as e:
+        print(f"--- ERRO ao chamar o modelo {MODELO_UNICO}: {e} ---")
+        return None
 
 # ======================
-# FUNÇÃO DE AVALIAÇÃO (IA) COM FALLBACK
+# FUNÇÃO DE AVALIAÇÃO (IA)
 # ======================
 def evaluate_open_answer_with_ai(question, ideal_answer, user_answer):
-    if not client: return {"nota": 0, "feedback": "Cliente de IA não configurado."}
+    if not client:
+        return {"nota": 0, "feedback": "Cliente de IA não configurado."}
     
     prompt = f"""
     As an AI teaching assistant, evaluate the user's answer based on the provided question and the ideal answer key (rubric).
@@ -150,38 +144,29 @@ def evaluate_open_answer_with_ai(question, ideal_answer, user_answer):
     The feedback text MUST be in Brazilian Portuguese (pt-BR).
     """
     
-    modelos_a_tentar = [MODELO_PRIMARIO, MODELO_SECUNDARIO]
-    for modelo in modelos_a_tentar:
-        try:
-            print(f"--- Tentando avaliar com o modelo: {modelo} ---")
-            completion = client.chat.completions.create(
-                model=modelo,
-                messages=[{"role": "user", "content": prompt}],
-                response_format={"type": "json_object"},
-                timeout=120
-            )
-            response_content = completion.choices[0].message.content
-
-            if response_content:
-                evaluation = json.loads(response_content)
-                if "nota" in evaluation and "feedback" in evaluation:
-                    print(f"--- Sucesso na avaliação com o modelo: {modelo} ---")
-                    return evaluation
-
-            print(f"--- Modelo {modelo} retornou resposta de avaliação vazia ou malformada. ---")
-
-        except Exception as e:
-            print(f"--- ERRO ao chamar o modelo de avaliação {modelo}: {e} ---")
-            continue
+    try:
+        completion = client.chat.completions.create(
+            model=MODELO_UNICO,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"},
+            timeout=120
+        )
+        response_content = completion.choices[0].message.content
+        if response_content:
+            evaluation = json.loads(response_content)
+            if "nota" in evaluation and "feedback" in evaluation:
+                return evaluation
+    except Exception as e:
+        print(f"--- ERRO ao chamar o modelo {MODELO_UNICO}: {e} ---")
     
-    print("--- Todos os modelos falharam em avaliar a resposta. ---")
-    return {"nota": 0, "feedback": "Ocorreu um erro ao tentar avaliar sua resposta com todos os modelos disponíveis."}
+    return {"nota": 0, "feedback": "Ocorreu um erro ao tentar avaliar sua resposta com o modelo DeepSeek."}
 
 # ======================
-# FUNÇÕES DE BANCO DE DADOS (APENAS PARA ERROS)
+# FUNÇÕES DE BANCO DE DADOS
 # ======================
 def salvar_erro(question_data, user_answer):
-    if not supabase: return
+    if not supabase:
+        return
     try:
         error_log = {
             "pergunta": question_data.get("pergunta") or question_data.get("texto_base") or question_data.get("pergunta_guia"),
@@ -197,14 +182,16 @@ def salvar_erro(question_data, user_answer):
         st.error(f"Erro ao salvar erro no Supabase: {e}")
 
 def listar_erros():
-    if not supabase: return []
+    if not supabase:
+        return []
     try:
         return supabase.table("erros").select("*").order("created_at", desc=True).execute().data
     except Exception as e:
-        st.error(f"Erro ao listar erros do Supabase: {e}"); return []
+        st.error(f"Erro ao listar erros do Supabase: {e}")
+        return []
 
 # ======================
-# INICIALIZAÇÃO DO ESTADO DA SESSÃO
+# INICIALIZAÇÃO DO ESTADO
 # ======================
 def initialize_session():
     st.session_state.quiz_started = False
@@ -216,161 +203,3 @@ def initialize_session():
 
 if 'quiz_started' not in st.session_state:
     initialize_session()
-
-# ======================
-# INTERFACE STREAMLIT
-# ======================
-st.sidebar.title("Quizia Pro")
-menu = st.sidebar.radio("Menu", ["Gerar e Resolver Quiz", "Revisar Erros", "Flashcards"])
-
-if menu == "Gerar e Resolver Quiz":
-    if not st.session_state.quiz_started:
-        st.title("➕ Gerar Novo Quiz a partir de um PDF")
-        st.markdown("O conteúdo do seu PDF será transformado em um quiz com diferentes tipos de questões.")
-        
-        with st.container(border=True):
-            uploaded_file = st.file_uploader("1. Selecione o arquivo PDF", type=["pdf"])
-            col1, col2 = st.columns(2)
-            with col1: dificuldade = st.selectbox("2. Dificuldade", ["Fácil", "Médio", "Difícil", "Aleatório"])
-            with col2: estilo = st.selectbox("3. Estilo", ["Aleatório", "Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas"])
-            
-            if st.button("Analisar e Gerar Quiz", type="primary", disabled=(not client or not uploaded_file)):
-                with st.status("Gerando seu quiz...", expanded=True) as status:
-                    status.update(label="Extraindo texto...", state="running")
-                    pdf_text = extract_text_from_pdf(uploaded_file)
-                    if not pdf_text: status.update(label="Falha ao extrair texto.", state="error"); st.stop()
-                    
-                    status.update(label="Dividindo conteúdo...", state="running")
-                    chunks = chunk_text(pdf_text)
-                    
-                    status.update(label="Gerando questões com a IA...", state="running")
-                    all_generated_questions = []
-                    with concurrent.futures.ThreadPoolExecutor() as executor:
-                        future_to_chunk = {executor.submit(generate_questions_for_chunk, chunk, estilo, dificuldade): chunk for chunk in chunks}
-                        for future in concurrent.futures.as_completed(future_to_chunk):
-                            questions_data = future.result()
-                            if questions_data: all_generated_questions.extend(questions_data)
-                    
-                    if not all_generated_questions: status.update(label="A IA não conseguiu gerar questões para este documento.", state="error"); st.stop()
-
-                    st.session_state.quiz_data = all_generated_questions
-                    st.session_state.quiz_started = True
-                    st.rerun()
-
-    if st.session_state.quiz_started:
-        st.title("🧠 Quiz em Andamento")
-        total_questions = len(st.session_state.quiz_data)
-        idx = st.session_state.current_question
-        max_score = total_questions * 10
-        st.subheader(f"Pontuação: {st.session_state.score:.1f} / {max_score}")
-
-        if idx < total_questions:
-            question = st.session_state.quiz_data[idx]
-            estilo_q = question.get("estilo", "Múltipla Escolha")
-
-            if estilo_q == 'Múltipla Escolha':
-                st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
-                with st.form(key=f"form_multi_{idx}"):
-                    user_answer = st.radio("Opções:", options=question.get("opcoes", []), index=None)
-                    submitted = st.form_submit_button("Responder")
-                    if submitted and user_answer is not None:
-                        st.session_state.answered = True
-                        if user_answer == question["resposta_correta"]:
-                            st.success(f"🎉 Correto! {question.get('justificativa', '')}")
-                            st.session_state.score += 10
-                        else:
-                            st.error(f"❌ Incorreto. Resposta certa: **{question['resposta_correta']}**. {question.get('justificativa', '')}")
-                            salvar_erro(question, user_answer)
-            
-            elif estilo_q == 'Aberta':
-                st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
-                with st.form(key=f"form_aberta_{idx}"):
-                    user_answer = st.text_area("Sua Resposta:", height=150)
-                    submitted = st.form_submit_button("Avaliar Resposta com IA")
-                    if submitted and user_answer:
-                        with st.spinner("Avaliando sua resposta..."):
-                            evaluation = evaluate_open_answer_with_ai(question['pergunta'], question['resposta_ideal'], user_answer)
-                        st.session_state.answered = True
-                        st.session_state.last_evaluation = evaluation
-                        nota = evaluation.get("nota", 0)
-                        st.session_state.score += nota
-                        if nota < 7: salvar_erro({"pergunta": question.get("pergunta"), "resposta_correta": question.get("resposta_ideal"), "estilo": "Aberta"}, user_answer)
-                        if nota >= 7: st.success(f"Ótima resposta! Nota: {nota}/10")
-                        elif nota >= 5: st.warning(f"Resposta razoável. Nota: {nota}/10")
-                        else: st.error(f"Resposta precisa de melhorias. Nota: {nota}/10")
-                        st.info(f"**Feedback da IA:** {evaluation.get('feedback', '')}")
-                        with st.expander("Ver gabarito completo"): st.info(f"{question['resposta_ideal']}")
-
-            elif estilo_q == 'Preencher Lacuna':
-                st.markdown(f"**Pergunta {idx + 1}:** Complete a frase:")
-                st.markdown(f"> `{question['texto_base'].replace('[L_A_C_U_N_A]', '___________')}`")
-                with st.form(key=f"form_lacuna_{idx}"):
-                    user_answer = st.text_input("Sua resposta para a lacuna:")
-                    submitted = st.form_submit_button("Verificar")
-                    if submitted and user_answer:
-                        st.session_state.answered = True
-                        respostas_corretas = [r.lower().strip() for r in question['respostas_aceitaveis']]
-                        if user_answer.lower().strip() in respostas_corretas:
-                            st.success("🎉 Correto!")
-                            st.session_state.score += 10
-                        else:
-                            st.error(f"❌ Incorreto. Respostas aceitáveis: **{', '.join(question['respostas_aceitaveis'])}**")
-                            salvar_erro(question, user_answer)
-
-            elif estilo_q == 'Associar Colunas':
-                st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta_guia']}")
-                with st.form(key=f"form_assoc_{idx}"):
-                    col1, col2 = st.columns(2)
-                    user_associations = {}
-                    shuffled_col_b = random.sample(question['coluna_b'], len(question['coluna_b']))
-                    with col1:
-                        st.subheader("Coluna A")
-                        for item_a in question['coluna_a']: st.markdown(f"- **{item_a}**")
-                    with col2:
-                        st.subheader("Coluna B")
-                        for i, item_a in enumerate(question['coluna_a']):
-                            user_associations[item_a] = st.selectbox(f"'{item_a}' corresponde a:", options=shuffled_col_b, key=f"select_{idx}_{i}", index=None)
-                    submitted = st.form_submit_button("Verificar Associações")
-                    if submitted:
-                        st.session_state.answered = True
-                        acertos = sum(1 for item_a, item_b in user_associations.items() if question['associacoes_corretas'].get(item_a) == item_b and item_b is not None)
-                        total_itens = len(question['coluna_a'])
-                        st.session_state.score += (acertos / total_itens) * 10
-                        st.info(f"Você acertou {acertos} de {total_itens} associações.")
-                        if acertos < total_itens:
-                            salvar_erro({"pergunta": question.get("pergunta_guia"), "resposta_correta": json.dumps(question.get("associacoes_corretas"), ensure_ascii=False), "estilo": "Associar Colunas"}, json.dumps(user_associations, ensure_ascii=False))
-                            with st.expander("Mostrar Gabarito"):
-                                for item_a, item_b_correto in question['associacoes_corretas'].items(): st.markdown(f"- **{item_a}** ➡️ **{item_b_correto}**")
-                        else:
-                            st.success("🎉 Perfeito! Todas as associações estão corretas.")
-
-            if st.session_state.get("answered"):
-                if st.button("Próxima Pergunta ➡️"):
-                    st.session_state.current_question += 1
-                    st.session_state.answered = False
-                    st.session_state.last_evaluation = None
-                    st.rerun()
-        else:
-            st.balloons()
-            st.success(f"🎉 Quiz Concluído! Pontuação final: {st.session_state.score:.1f} / {max_score}")
-            if st.button("Gerar Novo Quiz"):
-                initialize_session()
-                st.rerun()
-
-elif menu == "Revisar Erros":
-    st.title("🧐 Revise Seus Erros")
-    st.markdown("Aqui estão as questões que você errou para que possa revisar e aprender.")
-    erros = listar_erros()
-    if not erros:
-        st.info("Você ainda não errou nenhuma questão. Parabéns!")
-    else:
-        for erro in erros:
-            with st.container(border=True):
-                st.markdown(f"**Pergunta:** {erro['pergunta']}")
-                st.markdown(f"**Sua resposta:** <span style='color:red;'>{erro['resposta_usuario']}</span>", unsafe_allow_html=True)
-                st.markdown(f"**Resposta correta:** <span style.color:green;'>{erro['resposta_correta']}</span>", unsafe_allow_html=True)
-                if erro.get('justificativa'): st.info(f"**Justificativa:** {erro['justificativa']}")
-
-elif menu == "Flashcards":
-    st.title("🗂️ Flashcards para Estudo")
-    st.info("Funcionalidade em desenvolvimento.")
