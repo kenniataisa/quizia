@@ -23,7 +23,7 @@ import concurrent.futures
 # ======================
 # CONFIGURAÃ‡ÃƒO INICIAL
 # ======================
-st.set_page_config(page_title="Quizia Pro+", layout="wide", initial_sidebar_state="expanded")
+st.set_page_config(page_title="QuizIA Pro+", layout="wide", initial_sidebar_state="expanded")
 load_dotenv()
 
 api_key = os.getenv("OPENROUTER_API_KEY") or st.secrets.get("OPENROUTER_API_KEY")
@@ -31,7 +31,7 @@ supabase_url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
 
 if not all([api_key, supabase_url, supabase_key]):
-    st.error("âš ï¸ Chaves de API nÃ£o configuradas.", icon="ðŸš¨")
+    st.error("Chaves de API nao configuradas.", icon="🔐")
     st.stop()
 
 supabase = create_client(supabase_url, supabase_key)
@@ -68,7 +68,7 @@ def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
                 "dificuldade": q.get("dificuldade", "Desconhecida")
             }
             supabase.table("questoes").insert(data).execute()
-        st.success(f"âœ… QuestÃµes do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
+        st.success(f"Questoes do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
     except Exception as e:
         st.error(f"Erro ao salvar questÃµes: {e}")
 
@@ -92,8 +92,8 @@ def listar_questoes_por_disciplina(disciplina):
 # ==========================================================
 # INTERFACE INICIAL
 # ==========================================================
-st.title("ðŸ§  Quizia Pro+")
-st.markdown("Plataforma de geraÃ§Ã£o inteligente de quizzes com IA e Supabase.")
+st.title("QuizIA Pro+")
+st.markdown("Plataforma de geracao inteligente de quizzes com IA")
 
 if "show_upload" not in st.session_state:
     st.session_state.show_upload = False
@@ -104,15 +104,15 @@ if st.button("ðŸ“¤ Fazer upload de PDF para gerar quiz"):
 if st.session_state.show_upload:
     uploaded_file = st.file_uploader("Selecione um arquivo PDF", type=["pdf"])
     if uploaded_file:
-        st.success("Arquivo carregado com sucesso! VÃ¡ atÃ© o menu lateral para configurar e gerar suas questÃµes.")
+        st.success("Arquivo carregado com sucesso! Vá até o menu lateral para configurar e gerar suas questoes.")
 
 # ==========================================================
 # MENU LATERAL
 # ==========================================================
-st.sidebar.title("ðŸ“š NavegaÃ§Ã£o")
+st.sidebar.title("Navegacao")
 menu = st.sidebar.radio(
-    "Escolha uma opÃ§Ã£o:",
-    ["Disciplinas", "Flashcards", "RevisÃ£o de Erros", "Configurar Estilos", "Configurar Dificuldade"]
+    "Escolha uma opcao:",
+    ["Disciplinas", "Flashcards", "Revisao de Erros", "Configurar Estilos", "Configurar Dificuldade"]
 )
 
 # ----------------------------------------------------------
@@ -131,7 +131,7 @@ if menu == "Disciplinas":
                     st.markdown(f"**Pergunta:** {q['pergunta']}")
                     if q.get("opcoes"):
                         opcoes = json.loads(q["opcoes"])
-                        st.write("**OpÃ§Ãµes:**", ", ".join(opcoes))
+                        st.write("**Opcoes:**", ", ".join(opcoes))
                     st.write(f"**Resposta Correta:** {q['resposta_correta']}")
                     st.write(f"**Justificativa:** {q['justificativa']}")
                     st.caption(f"**Dificuldade:** {q['dificuldade']}")
@@ -140,11 +140,11 @@ if menu == "Disciplinas":
 # 2ï¸âƒ£ MENU CONFIGURAR ESTILOS
 # ----------------------------------------------------------
 elif menu == "Configurar Estilos":
-    st.header("ðŸŽ¨ Estilos de QuestÃµes")
+    st.header("Estilos de Questoes")
     estilos = st.multiselect(
-        "Selecione os estilos de questÃµes que deseja permitir:",
-        ["MÃºltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"],
-        default=["MÃºltipla Escolha", "Aberta"]
+        "Selecione os estilos de questoes que deseja permitir:",
+        ["Multipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"],
+        default=["Multipla Escolha", "Aberta"]
     )
     st.session_state.estilos_selecionados = estilos
     st.success("Estilos atualizados com sucesso!")
@@ -153,23 +153,23 @@ elif menu == "Configurar Estilos":
 # 3ï¸âƒ£ MENU CONFIGURAR DIFICULDADE
 # ----------------------------------------------------------
 elif menu == "Configurar Dificuldade":
-    st.header("âš™ï¸ NÃ­veis de Dificuldade")
-    dificuldade = st.selectbox("Escolha o nÃ­vel padrÃ£o de dificuldade:", ["AleatÃ³rio", "FÃ¡cil", "MÃ©dio", "DifÃ­cil"])
+    st.header("Niveis de Dificuldade")
+    dificuldade = st.selectbox("Escolha o nivel de dificuldade:", ["Aleatorio", "Facil", "Medio", "Dificil"])
     st.session_state.dificuldade = dificuldade
-    st.success("NÃ­vel de dificuldade configurado!")
+    st.success("Nivel de dificuldade configurado!")
 
 # ----------------------------------------------------------
 # 4ï¸âƒ£ MENU FLASHCARDS
 # ----------------------------------------------------------
 elif menu == "Flashcards":
-    st.header("ðŸ—‚ï¸ Flashcards")
+    st.header("Flashcards")
     st.info("Funcionalidade em desenvolvimento.")
 
 # ----------------------------------------------------------
 # 5ï¸âƒ£ MENU REVISÃƒO DE ERROS
 # ----------------------------------------------------------
-elif menu == "RevisÃ£o de Erros":
-    st.header("ðŸ§ RevisÃ£o de Erros")
+elif menu == "Revisao de Erros":
+    st.header("Revisao de Erros")
     erros = supabase.table("erros").select("*").order("created_at", desc=True).execute().data
     if not erros:
         st.info("Nenhum erro registrado ainda.")
