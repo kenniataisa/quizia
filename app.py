@@ -68,7 +68,6 @@ def chunk_text(text, chunk_size=8000, overlap=400):
 def get_json_format_instruction(estilo):
     """
     Retorna a instrução de formato JSON correta para cada estilo de questão.
-    NOVO: Exige a chave 'contexto_citado' em todos os tipos.
     """
     base_instruction = """"contexto_citado": "The exact quote or paragraph from the reference text used to create this question.",\n"""
     
@@ -92,17 +91,43 @@ def get_json_format_instruction(estilo):
         "coluna_a" and "coluna_b" must be lists of strings.
         "associacoes_corretas" must be a dictionary mapping each item from "coluna_a" to its correct corresponding item in "coluna_b".
         """
-    # Padrão: Múltipla Escolha
+    
+    # --- NOVO: Bloco específico para Verdadeiro ou Falso ---
+    if estilo == "Verdadeiro ou Falso":
+        return f"""
+        Each question object must have these keys: "pergunta", "estilo", "opcoes", "resposta_correta", "justificativa", and "contexto_citado".
+        {base_instruction}
+        "pergunta" MUST be a declarative statement that can be judged as true or false.
+        "estilo" MUST be "Verdadeiro ou Falso".
+        "opcoes" MUST be the list ["Verdadeiro", "Falso"].
+        "resposta_correta" MUST be either "Verdadeiro" or "Falso".
+        "justificativa" must explain why the statement is true or false, based on the context.
+        """
+
+    # Padrão: Múltipla Escolha (CORRIGIDO para evitar o bug a,b,c,d)
     return f"""
     Each question object must have these keys: "pergunta", "estilo", "opcoes", "resposta_correta", "justificativa", and "contexto_citado".
     {base_instruction}
+    "pergunta" MUST contain only the question text. Do NOT include the 'a)', 'b)', 'c)', 'd)' prefixes in the question string.
+    "estilo" MUST be "Múltipla Escolha".
+    "opcoes" MUST be a list containing the FULL TEXT of each answer choice (e.g., ["Paris", "Londres", "Berlim"]).
+    "resposta_correta" MUST be the full text of the correct option, exactly matching one of the items in the "opcoes" list (e.g., "Paris").
+
+    Example of a PERFECT object:
+    {{
+        "pergunta": "Qual é a capital da França?",
+        "estilo": "Múltipla Escolha",
+        "opcoes": ["Londres", "Berlim", "Paris", "Roma"],
+        "resposta_correta": "Paris",
+        "justificativa": "Paris é a capital e a cidade mais populosa da França.",
+        "contexto_citado": "A capital da França é Paris, ..."
+    }}
     """
 
 def generate_questions_for_chunk(text_chunk, estilos_list, dificuldade, num_questions_per_chunk):
     if not client:
         return None
 
-    # NOVO: Seleciona aleatoriamente um dos estilos desejados pelo usuário para este chunk
     estilos_disponiveis = estilos_list if estilos_list else ["Múltipla Escolha"]
     estilo_escolhido = random.choice(estilos_disponiveis)
     
@@ -180,7 +205,6 @@ def salvar_erro(question_data, user_answer):
     if not supabase:
         return
     try:
-        # NOVO: Adiciona 'contexto_citado' ao log de erro
         error_log = {
             "pergunta": question_data.get("pergunta") or question_data.get("texto_base") or question_data.get("pergunta_guia"),
             "resposta_correta": question_data.get("resposta_correta") or ", ".join(question_data.get("respostas_aceitaveis", [])) or json.dumps(question_data.get("associacoes_corretas"), ensure_ascii=False),
@@ -188,7 +212,7 @@ def salvar_erro(question_data, user_answer):
             "estilo": question_data.get("estilo"),
             "opcoes": json.dumps(question_data.get("opcoes", []), ensure_ascii=False),
             "justificativa": question_data.get("justificativa") or f"Nota IA: {st.session_state.last_evaluation.get('nota') if st.session_state.last_evaluation else 'N/A'}",
-            "contexto_citado": question_data.get("contexto_citado", "Contexto não fornecido pela IA.") # NOVO
+            "contexto_citado": question_data.get("contexto_citado", "Contexto não fornecido pela IA.")
         }
         supabase.table("erros").insert(error_log).execute()
         st.toast("Ops! Erro registado para sua revisão.", icon="💔")
@@ -236,14 +260,13 @@ if menu == "Gerar e Resolver Quiz":
             with col1:
                 dificuldade = st.selectbox("2. Dificuldade", ["Aleatório", "Fácil", "Médio", "Difícil"])
             with col2:
-                # NOVO: Multiselect para estilos
+                # --- MUDANÇA: Adicionado "Verdadeiro ou Falso" ---
                 estilos_selecionados = st.multiselect(
                     "3. Estilos de Questão", 
-                    options=["Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas"], 
-                    default=["Múltipla Escolha", "Aberta"]
+                    options=["Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"], 
+                    default=["Múltipla Escolha", "Aberta", "Verdadeiro ou Falso"]
                 )
             
-            # NOVO: Seleção de número de questões
             num_questoes = st.number_input("4. Número Total de Questões", min_value=1, max_value=50, value=10)
             
             if st.button("Analisar e Gerar Quiz", type="primary", disabled=(not client or not uploaded_file)):
@@ -260,7 +283,6 @@ if menu == "Gerar e Resolver Quiz":
                          status.update(label="PDF sem texto legível.", state="error")
                          st.stop()
                     
-                    # NOVO: Lógica para calcular questões por chunk
                     q_per_chunk = max(1, int(num_questoes / len(chunks)) + 1)
                     
                     status.update(label=f"Gerando questões com a IA (Modelo: {MODELO_GERACAO})...", state="running")
@@ -279,7 +301,6 @@ if menu == "Gerar e Resolver Quiz":
                         status.update(label="A IA não conseguiu gerar questões para este documento.", state="error")
                         st.stop()
 
-                    # NOVO: Embaralha e fatia para o número exato desejado
                     random.shuffle(all_generated_questions)
                     st.session_state.quiz_data = all_generated_questions[:num_questoes]
                     st.session_state.quiz_started = True
@@ -297,15 +318,14 @@ if menu == "Gerar e Resolver Quiz":
             question = st.session_state.quiz_data[idx]
             estilo_q = question.get("estilo", "Múltipla Escolha")
 
-            # ------- Questão: Múltipla Escolha -------
-            if estilo_q == 'Múltipla Escolha':
+            # --- MUDANÇA: "Múltipla Escolha" e "Verdadeiro ou Falso" usam a mesma lógica ---
+            if estilo_q in ['Múltipla Escolha', 'Verdadeiro ou Falso']:
                 st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta']}")
-                with st.form(key=f"form_multi_{idx}"):
+                with st.form(key=f"form_radio_{idx}"): # Chave unificada
                     user_answer = st.radio("Opções:", options=question.get("opcoes", []), index=None)
                     submitted = st.form_submit_button("Responder")
                     if submitted and user_answer is not None:
                         st.session_state.answered = True
-                        # BUGFIX: Converte ambos para string e remove espaços
                         if str(user_answer).strip() == str(question["resposta_correta"]).strip():
                             st.success(f"🎉 Correto! {question.get('justificativa', '')}")
                             st.session_state.score += 10
@@ -330,22 +350,18 @@ if menu == "Gerar e Resolver Quiz":
                         st.session_state.last_evaluation = evaluation
                         nota = evaluation.get("nota", 0)
                         st.session_state.score += nota
-                        # Salva erro se a nota for baixa
                         if nota < 7:
                             salvar_erro(question, user_answer)
                         
-                        if nota >= 7:
-                            st.success(f"Ótima resposta! Nota: {nota}/10")
-                        elif nota >= 5:
-                            st.warning(f"Resposta razoável. Nota: {nota}/10")
-                        else:
-                            st.error(f"Resposta precisa de melhorias. Nota: {nota}/10")
+                        if nota >= 7: st.success(f"Ótima resposta! Nota: {nota}/10")
+                        elif nota >= 5: st.warning(f"Resposta razoável. Nota: {nota}/10")
+                        else: st.error(f"Resposta precisa de melhorias. Nota: {nota}/10")
                         
                         st.info(f"**Feedback da IA:** {evaluation.get('feedback', '')}")
                         with st.expander("Ver gabarito completo (Resposta Ideal)"):
                             st.info(f"{question['resposta_ideal']}")
 
-            # ------- NOVO: Questão: Preencher Lacuna -------
+            # ------- Questão: Preencher Lacuna -------
             elif estilo_q == 'Preencher Lacuna':
                 st.markdown(f"**Pergunta {idx + 1}:** {question['texto_base'].replace('[L_A_C_U_N_A]', '___________')}")
                 with st.form(key=f"form_lacuna_{idx}"):
@@ -361,7 +377,7 @@ if menu == "Gerar e Resolver Quiz":
                             st.error(f"❌ Incorreto. Respostas aceitáveis: **{', '.join(question['respostas_aceitaveis'])}**")
                             salvar_erro(question, user_answer)
 
-            # ------- NOVO: Questão: Associar Colunas -------
+            # ------- Questão: Associar Colunas -------
             elif estilo_q == 'Associar Colunas':
                 st.markdown(f"**Pergunta {idx + 1}:** {question['pergunta_guia']}")
                 col_a = question.get('coluna_a', [])
@@ -431,7 +447,6 @@ elif menu == "Revisar Erros":
                 if erro.get('justificativa'):
                     st.info(f"**Justificativa:** {erro['justificativa']}")
                 
-                # NOVO: Exibe o contexto do PDF
                 if erro.get('contexto_citado'):
                     with st.expander("Ver contexto do PDF (Onde a resposta estava)"):
                         st.info(f"{erro['contexto_citado']}")
