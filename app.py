@@ -70,7 +70,7 @@ def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
             supabase.table("questoes").insert(data).execute()
         st.success(f"Questoes do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
     except Exception as e:
-        st.error(f"Erro ao salvar questÃµes: {e}")
+        st.error(f"Erro ao salvar questoes: {e}")
 
 def listar_disciplinas():
     try:
@@ -98,7 +98,7 @@ st.markdown("Plataforma de geracao inteligente de quizzes com IA")
 if "show_upload" not in st.session_state:
     st.session_state.show_upload = False
 
-if st.button("ðŸ“¤ Fazer upload de PDF para gerar quiz"):
+if st.button("Fazer upload de PDF para gerar quiz"):
     st.session_state.show_upload = not st.session_state.show_upload
 
 if st.session_state.show_upload:
