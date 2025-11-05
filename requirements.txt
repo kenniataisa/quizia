@@ -8,3 +8,4 @@ requests
 streamlit-option-menu
 streamlit-extras
 pandas
+PyMuPDF
