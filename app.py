@@ -1,149 +1,196 @@
 import streamlit as st
+import fitz  # PyMuPDF
 import json
+from supabase import create_client, Client
+from openai import OpenAI
 import time
-import requests
+import uuid
 
-# =====================================================
-# CONFIGURAÇÕES INICIAIS
-# =====================================================
+# -------------------------------
+# 🔑 Configurações
+# -------------------------------
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 
-st.set_page_config(page_title="QuizIA", layout="centered")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-st.title("🤖 QuizIA - Geração de Questões Inteligentes")
-st.markdown("Crie quizzes automáticos com base no conteúdo de um livro, artigo ou apostila 📘")
+# -------------------------------
+# 🔧 Inicializa clientes OpenRouter
+# -------------------------------
+def create_openrouter_client():
+    return OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
 
-# =====================================================
-# FUNÇÕES AUXILIARES
-# =====================================================
+deepseek_client = create_openrouter_client()
+llama_client = create_openrouter_client()
 
-def dividir_em_chunks(texto, tamanho_chunk=2000, sobreposicao=200):
-    """
-    Divide o texto em partes menores mantendo contexto.
-    """
-    palavras = texto.split()
+# -------------------------------
+# 📘 Função: Extrair texto do PDF
+# -------------------------------
+def extract_text_from_pdf(uploaded_file):
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    text = ""
+    for page in doc:
+        text += page.get_text("text") + "\n"
+    return text.strip()
+
+# -------------------------------
+# ✂️ Dividir texto em chunks
+# -------------------------------
+def chunk_text(text, max_chars=3000):
+    paragraphs = text.split("\n")
     chunks = []
-    for i in range(0, len(palavras), tamanho_chunk - sobreposicao):
-        parte = " ".join(palavras[i:i + tamanho_chunk])
-        chunks.append(parte)
+    current_chunk = ""
+    for para in paragraphs:
+        if len(current_chunk) + len(para) < max_chars:
+            current_chunk += para + "\n"
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = para + "\n"
+    if current_chunk:
+        chunks.append(current_chunk.strip())
     return chunks
 
+# -------------------------------
+# 🤖 Gerar questões com DeepSeek
+# -------------------------------
+def gerar_questoes_deepseek(texto):
+    prompt = f"""
+    Gere 5 questões de múltipla escolha baseadas no seguinte conteúdo:
+    {texto}
 
-def gerar_questoes_com_ia(conteudo, disciplina):
-    """
-    Chama a API (simulada aqui) para gerar questões de múltipla escolha com justificativa.
-    Retorna uma lista de dicionários contendo:
-    pergunta, opcoes, resposta_correta, justificativa
-    """
-    # Simulação de chamada de API
-    # Você pode substituir esta parte por uma chamada real ao seu endpoint LLM.
-    time.sleep(2)
-    questoes = [
-        {
-            "pergunta": "Qual é o objetivo principal da camada de transporte em redes de computadores?",
-            "opcoes": [
-                "A) Fornecer comunicação lógica entre processos de aplicação em hosts diferentes",
-                "B) Garantir a transmissão física de dados através do meio",
-                "C) Definir endereçamento IP para roteamento de pacotes",
-                "D) Controlar o acesso múltiplo ao meio físico"
-            ],
-            "resposta_correta": "A",
-            "justificativa": "A camada de transporte fornece comunicação lógica entre processos de aplicação em hosts diferentes, conforme descrito no livro."
-        },
-        {
-            "pergunta": "Qual destes protocolos oferece entrega confiável e controle de congestionamento?",
-            "opcoes": [
-                "A) UDP",
-                "B) IP",
-                "C) TCP",
-                "D) ARP"
-            ],
-            "resposta_correta": "C",
-            "justificativa": "O protocolo TCP é orientado à conexão e fornece entrega confiável e controle de congestionamento."
-        }
+    Formato de resposta em JSON:
+    [
+      {{
+        "pergunta": "texto da questão",
+        "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
+        "resposta_correta": "A",
+        "justificativa": "explicação curta baseada no texto"
+      }}
     ]
-    return questoes
-
-
-def gerar_questoes_para_todo_texto(texto, disciplina):
     """
-    Gera questões para cada chunk do texto, com barra de progresso e feedback visual.
+    response = deepseek_client.chat.completions.create(
+        model="tngtech/deepseek-r1t2-chimera:free",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    content = response.choices[0].message.content
+    try:
+        return json.loads(content)
+    except:
+        st.warning("Não foi possível decodificar a resposta da IA. Verifique o formato.")
+        return []
+
+# -------------------------------
+# 🧹 Refinar questões com Llama
+# -------------------------------
+def refinar_questoes_llama(questoes):
+    prompt = f"""
+    Revise as seguintes questões, corrija inconsistências e melhore clareza e gramática.
+    Mantenha o formato JSON idêntico.
+
+    Questões:
+    {json.dumps(questoes, ensure_ascii=False, indent=2)}
     """
-    chunks = dividir_em_chunks(texto)
-    todas_questoes = []
+    response = llama_client.chat.completions.create(
+        model="meta-llama/llama-3.3-70b-instruct:free",
+        messages=[{"role": "user", "content": prompt}],
+    )
+    content = response.choices[0].message.content
+    try:
+        return json.loads(content)
+    except:
+        return questoes
 
-    barra = st.progress(0)
-    total_chunks = len(chunks)
+# -------------------------------
+# 💾 Salvar no Supabase
+# -------------------------------
+def salvar_quiz(disciplina, nome, questoes):
+    data = {
+        "id": str(uuid.uuid4()),
+        "nome": nome,
+        "disciplina": disciplina,
+        "questoes": questoes,
+    }
+    supabase.table("quizzes").insert(data).execute()
 
-    for i, chunk in enumerate(chunks):
-        st.info(f"🔍 Gerando questões do trecho {i+1}/{total_chunks}...")
-        questoes_chunk = gerar_questoes_com_ia(chunk, disciplina)
-        todas_questoes.extend(questoes_chunk)
-        barra.progress((i + 1) / total_chunks)
-        time.sleep(0.3)
+# -------------------------------
+# 🧩 Interface Streamlit
+# -------------------------------
+st.set_page_config(page_title="QuizIA", layout="wide")
+st.title("🧠 QuizIA - Gerador de Questões com DeepSeek + Llama")
 
-    st.success(f"✅ {len(todas_questoes)} questões geradas com sucesso!")
-    return todas_questoes
+aba = st.sidebar.radio("Navegar", ["Gerar Quiz", "Responder Quiz"])
 
+# -------------------------------
+# 📄 A. Gerar Quiz
+# -------------------------------
+if aba == "Gerar Quiz":
+    st.header("📘 Enviar conteúdo para gerar questões")
 
-# =====================================================
-# INTERFACE DO APP
-# =====================================================
+    uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"])
+    mostrar_texto = st.checkbox("Mostrar campo de texto manual")
+    texto_manual = ""
 
-aba = st.sidebar.radio("📚 Menu", ["Gerar Questões", "Responder Quiz"])
+    if mostrar_texto:
+        texto_manual = st.text_area("Ou cole o conteúdo aqui", height=200)
 
-# =====================================================
-# ABA 1: GERAR QUESTÕES
-# =====================================================
-if aba == "Gerar Questões":
-    st.header("🧠 Gerar Questões a partir de um Texto")
+    disciplina = st.text_input("Disciplina")
+    nome_quiz = st.text_input("Nome do Quiz")
 
-    disciplina = st.text_input("Digite o nome da disciplina:")
-    texto = st.text_area("Cole aqui o conteúdo (ex: texto do livro, resumo ou apostila):", height=300)
+    if st.button("🚀 Gerar Questões"):
+        with st.spinner("Gerando questões com IA..."):
+            texto = ""
+            if uploaded_file:
+                texto = extract_text_from_pdf(uploaded_file)
+            elif texto_manual:
+                texto = texto_manual
+            else:
+                st.warning("Envie um PDF ou insira texto!")
+                st.stop()
 
-    if st.button("Gerar Questões"):
-        if not texto.strip() or not disciplina.strip():
-            st.warning("⚠️ Por favor, preencha todos os campos.")
-        else:
-            questoes = gerar_questoes_para_todo_texto(texto, disciplina)
+            chunks = chunk_text(texto)
+            questoes_final = []
 
-            st.session_state["questoes_geradas"] = questoes
-            st.success("Questões geradas e salvas na sessão. Vá até a aba **Responder Quiz** para testá-las.")
+            for i, chunk in enumerate(chunks):
+                st.info(f"🔹 Processando parte {i+1}/{len(chunks)}...")
+                q = gerar_questoes_deepseek(chunk)
+                q_refinado = refinar_questoes_llama(q)
+                questoes_final.extend(q_refinado)
+                time.sleep(2)
 
+            if questoes_final:
+                salvar_quiz(disciplina, nome_quiz, questoes_final)
+                st.success(f"✅ {len(questoes_final)} questões geradas e salvas com sucesso!")
+                st.json(questoes_final)
 
-# =====================================================
-# ABA 2: RESPONDER QUIZ
-# =====================================================
+# -------------------------------
+# 🎯 B. Responder Quiz
+# -------------------------------
 elif aba == "Responder Quiz":
-    st.header("🎯 Responder Quiz Interativo")
+    st.header("🎯 Responder um Quiz")
 
-    if "questoes_geradas" not in st.session_state:
-        st.warning("⚠️ Nenhum quiz gerado ainda. Vá até a aba 'Gerar Questões' primeiro.")
+    quizzes = supabase.table("quizzes").select("*").execute()
+    if not quizzes.data:
+        st.warning("Nenhum quiz encontrado.")
     else:
-        questoes = st.session_state["questoes_geradas"]
-        pontuacao = 0
+        nomes = [q["nome"] for q in quizzes.data]
+        escolha = st.selectbox("Escolha um quiz", nomes)
+        quiz = next(q for q in quizzes.data if q["nome"] == escolha)
+
+        questoes = quiz["questoes"]
+        if isinstance(questoes, str):
+            questoes = json.loads(questoes)
 
         for i, q in enumerate(questoes):
-            st.markdown(f"### {i+1}. {q['pergunta']}")
-            escolha = st.radio("Escolha uma opção:", q["opcoes"], key=f"q{i}")
-
-            # Captura a letra da resposta escolhida
-            letra_escolhida = escolha.split(")")[0]
-            if letra_escolhida == q["resposta_correta"]:
-                st.success("✅ Resposta correta!")
-                pontuacao += 1
-            else:
-                st.error(f"❌ Resposta incorreta. A correta é **{q['resposta_correta']}**.")
-            st.markdown(f"📘 *Justificativa:* {q['justificativa']}")
-            st.divider()
-
-        total = len(questoes)
-        st.subheader("📊 Resultado Final")
-        st.write(f"Você acertou **{pontuacao}/{total}** questões ({pontuacao/total*100:.1f}%)")
-
-        if pontuacao / total == 1:
-            st.balloons()
-            st.success("🎉 Excelente! Você acertou todas!")
-        elif pontuacao / total >= 0.7:
-            st.info("💪 Bom desempenho! Continue assim.")
-        else:
-            st.warning("📚 Estude um pouco mais e tente novamente!")
+            st.write(f"**{i+1}. {q['pergunta']}**")
+            resposta = st.radio("Escolha uma opção:", q["opcoes"], key=f"q{i}")
+            if st.button(f"Verificar {i+1}", key=f"b{i}"):
+                correta = q["resposta_correta"]
+                if resposta.startswith(correta):
+                    st.success("✅ Correto!")
+                else:
+                    st.error(f"❌ Incorreto. Resposta correta: {correta}")
+                st.info(q["justificativa"])
