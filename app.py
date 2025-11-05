@@ -80,22 +80,113 @@ if uploaded_file:
         if st.button("💾 Salvar Quiz"):
             salvar_questoes_no_supabase(nome_quiz, disciplina, questoes_geradas)
 
-# --- Exibição das disciplinas ---
-st.sidebar.title("📚 Disciplinas")
-disciplinas = listar_disciplinas()
-for d in disciplinas:
-    if st.sidebar.button(d):
-        questoes = listar_questoes_por_disciplina(d)
-        st.subheader(f"📘 Questões de {d}")
-        for i, q in enumerate(questoes):
-            st.write(f"**{i+1}. {q['pergunta']}**")
-            op = json.loads(q["opcoes"])
-            resposta = st.radio("Escolha uma opção:", op, key=f"{d}_{i}")
+# ==========================================================
+# MENU LATERAL
+# ==========================================================
+st.sidebar.title("📚 Navegação")
+menu = st.sidebar.radio(
+    "Escolha uma opção:",
+    ["Disciplinas", "Flashcards", "Revisão de Erros", "Configurar Estilos", "Configurar Dificuldade"]
+)
 
-            if st.button(f"Verificar {i}", key=f"verificar_{i}"):
-                if resposta == q["resposta_correta"]:
-                    st.success("✅ Correto!")
-                else:
-                    st.error(f"❌ Errado! Resposta correta: {q['resposta_correta']}")
-                if q.get("justificativa"):
-                    st.info(f"📘 Justificativa: {q['justificativa']}")
+# Criar um container limpo para cada aba
+st.session_state.placeholder = st.empty()
+
+# ----------------------------------------------------------
+# 📘 1. MENU DISCIPLINAS
+# ----------------------------------------------------------
+if menu == "Disciplinas":
+    with st.session_state.placeholder.container():
+        disciplinas = listar_disciplinas()
+        if not disciplinas:
+            st.info("Nenhuma disciplina cadastrada ainda. Gere um quiz primeiro!")
+        else:
+            disciplina = st.selectbox("Selecione uma disciplina:", disciplinas)
+            questoes = listar_questoes_por_disciplina(disciplina)
+
+            if questoes:
+                st.subheader(f"📖 Questões de {disciplina}")
+                for i, q in enumerate(questoes):
+                    pergunta = (
+                        q.get("pergunta")
+                        or q.get("texto_base")
+                        or q.get("pergunta_guia")
+                        or "Pergunta não disponível"
+                    )
+
+                    st.markdown(f"**{i+1}. {pergunta}**")
+
+                    try:
+                        opcoes = json.loads(q.get("opcoes", "[]"))
+                    except Exception:
+                        opcoes = []
+
+                    if opcoes:
+                        resposta = st.radio(
+                            f"Escolha a resposta da questão {i+1}:",
+                            opcoes,
+                            key=f"resposta_{i}",
+                        )
+
+                        # Feedback imediato
+                        correta = q.get("resposta_correta", "").strip()
+                        if resposta:
+                            if resposta.lower() == correta.lower():
+                                st.success("✅ Correto!")
+                            else:
+                                st.error(f"❌ Incorreto! Resposta certa: **{correta}**")
+
+                    st.caption(f"**Dificuldade:** {q.get('dificuldade', 'Desconhecida')}")
+                    st.divider()
+
+# ----------------------------------------------------------
+# 🧩 2. MENU CONFIGURAR ESTILOS
+# ----------------------------------------------------------
+elif menu == "Configurar Estilos":
+    with st.session_state.placeholder.container():
+        st.header("🎨 Estilos de Questões")
+        estilos = st.multiselect(
+            "Selecione os estilos de questões que deseja permitir:",
+            ["Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"],
+            default=["Múltipla Escolha", "Aberta"],
+        )
+        st.session_state.estilos_selecionados = estilos
+        st.success("Estilos atualizados com sucesso!")
+
+# ----------------------------------------------------------
+# ⚙️ 3. MENU CONFIGURAR DIFICULDADE
+# ----------------------------------------------------------
+elif menu == "Configurar Dificuldade":
+    with st.session_state.placeholder.container():
+        st.header("📈 Níveis de Dificuldade")
+        dificuldade = st.selectbox(
+            "Escolha o nível de dificuldade:",
+            ["Aleatório", "Fácil", "Médio", "Difícil"],
+        )
+        st.session_state.dificuldade = dificuldade
+        st.success("Nível de dificuldade configurado!")
+
+# ----------------------------------------------------------
+# 🧠 4. MENU FLASHCARDS
+# ----------------------------------------------------------
+elif menu == "Flashcards":
+    with st.session_state.placeholder.container():
+        st.header("🧠 Flashcards")
+        st.info("Funcionalidade em desenvolvimento. Em breve você poderá revisar conteúdo de forma interativa!")
+
+# ----------------------------------------------------------
+# ❌ 5. MENU REVISÃO DE ERROS
+# ----------------------------------------------------------
+elif menu == "Revisão de Erros":
+    with st.session_state.placeholder.container():
+        st.header("📋 Revisão de Erros")
+        erros = supabase.table("erros").select("*").order("created_at", desc=True).execute().data
+        if not erros:
+            st.info("Nenhum erro registrado ainda.")
+        else:
+            for erro in erros:
+                with st.container(border=True):
+                    st.write(f"**Pergunta:** {erro.get('pergunta', '—')}")
+                    st.write(f"**Sua Resposta:** {erro.get('resposta_usuario', '—')}")
+                    st.write(f"**Correta:** {erro.get('resposta_correta', '—')}")
+                    st.caption(erro.get("justificativa", ""))
