@@ -1,12 +1,4 @@
 streamlit
-openai
-supabase
-python-dotenv
-pypdf
-Pillow
-requests
-streamlit-option-menu
-streamlit-extras
-pandas
 PyMuPDF
-fitz 
+supabase
+openai
