@@ -10,12 +10,10 @@ import re  # Importando regex para limpeza de JSON
 # -------------------------------
 # 🔑 Configurações
 # -------------------------------
-# Certifique-se de que suas chaves estão no Streamlit Secrets
 SUPABASE_URL = st.secrets.get("SUPABASE_URL", "SUA_URL_AQUI")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "SUA_CHAVE_AQUI")
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "SUA_CHAVE_AQUI")
 
-# Verificação de inicialização
 if SUPABASE_URL == "SUA_URL_AQUI" or SUPABASE_KEY == "SUA_CHAVE_AQUI" or OPENROUTER_API_KEY == "SUA_CHAVE_AQUI":
     st.error("As chaves de API (Supabase, OpenRouter) não foram configuradas nos 'Secrets' do Streamlit.")
     st.stop()
@@ -35,7 +33,7 @@ deepseek_client = create_openrouter_client()
 llama_client = create_openrouter_client()
 
 # -------------------------------
-# 📘 Função: Extrair texto do PDF
+# 📚 Funções de Extração e Chunk
 # -------------------------------
 def extract_text_from_pdf(uploaded_file):
     try:
@@ -48,9 +46,6 @@ def extract_text_from_pdf(uploaded_file):
         st.error(f"Erro ao ler o PDF: {e}")
         return ""
 
-# -------------------------------
-# ✂️ Dividir texto em chunks
-# -------------------------------
 def chunk_text(text, max_chars=3000):
     paragraphs = text.split("\n")
     chunks = []
@@ -66,21 +61,36 @@ def chunk_text(text, max_chars=3000):
     return chunks
 
 # -------------------------------
-# 🤖 Gerar questões com DeepSeek
+# 🤖 Funções de Geração de IA
 # -------------------------------
+def limpar_json_ia(content, tipo_lista=True):
+    """Tenta extrair um objeto JSON de uma string de resposta da IA."""
+    if tipo_lista:
+        # Tenta encontrar uma lista JSON [...]
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+    else:
+        # Tenta encontrar um objeto JSON {...}
+        match = re.search(r'\{.*\}', content, re.DOTALL)
+        
+    if match:
+        json_text = match.group(0)
+    else:
+        # Fallback se não encontrar os colchetes/chaves
+        json_text = content
+        
+    try:
+        return json.loads(json_text)
+    except json.JSONDecodeError:
+        st.warning(f"Não foi possível decodificar a resposta da IA. Resposta bruta: {content[:100]}...")
+        return None
+
 def gerar_questoes_deepseek(texto):
     prompt = f"""
     Gere 5 questões de múltipla escolha baseadas no seguinte conteúdo:
     {texto}
-
     Formato de resposta em JSON (uma lista de objetos):
     [
-      {{
-        "pergunta": "texto da questão",
-        "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
-        "resposta_correta": "A",
-        "justificativa": "explicação curta baseada no texto"
-      }}
+      {{"pergunta": "...", "opcoes": ["A) ...", "B) ..."], "resposta_correta": "A", "justificativa": "..."}}
     ]
     """
     try:
@@ -89,36 +99,16 @@ def gerar_questoes_deepseek(texto):
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
-        
-        # Limpeza robusta de JSON
-        match = re.search(r'\[.*\]', content, re.DOTALL)
-        if match:
-            content = match.group(0)
-        else:
-            # Se não achar uma lista, tenta achar um objeto (menos provável)
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                content = match.group(0)
-
-        return json.loads(content)
-    except json.JSONDecodeError:
-        st.warning(f"Não foi possível decodificar a resposta da IA (DeepSeek). Tentando novamente...")
-        return [] # Retorna lista vazia em caso de erro
+        return limpar_json_ia(content, tipo_lista=True) or []
     except Exception as e:
-        st.error(f"Erro na API DeepSeek: {e}")
+        st.error(f"Erro na API DeepSeek (Quiz): {e}")
         return []
 
-# -------------------------------
-# 🧹 Refinar questões com Llama
-# -------------------------------
 def refinar_questoes_llama(questoes):
-    if not questoes:
-        return []
-    
+    if not questoes: return []
     prompt = f"""
     Revise as seguintes questões, corrija inconsistências e melhore clareza e gramática.
     Mantenha o formato JSON idêntico.
-
     Questões:
     {json.dumps(questoes, ensure_ascii=False, indent=2)}
     """
@@ -128,29 +118,35 @@ def refinar_questoes_llama(questoes):
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
-
-        # --- NOVA LIMPEZA ROBUSTA ---
-        match = re.search(r'\[.*\]', content, re.DOTALL)
-        if match:
-            json_text = match.group(0)
-        else:
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                json_text = match.group(0)
-            else:
-                json_text = content
-
-        return json.loads(json_text)
-    
-    except json.JSONDecodeError:
-        st.warning("Não foi possível decodificar a resposta do Llama. Usando as questões originais.")
-        return questoes 
+        return limpar_json_ia(content, tipo_lista=True) or questoes
     except Exception as e:
-        st.error(f"Erro na API Llama: {e}")
+        st.error(f"Erro na API Llama (Refino): {e}")
         return questoes
 
+def gerar_flashcards_ia(texto):
+    """NOVA FUNÇÃO para gerar flashcards."""
+    prompt = f"""
+    Gere 5 a 10 flashcards de "frente e verso" baseados no seguinte conteúdo.
+    Foque em conceitos-chave, termos e definições.
+    {texto}
+    Formato de resposta em JSON (uma lista de objetos):
+    [
+      {{"frente": "Termo ou Pergunta Curta", "verso": "Definição ou Resposta Completa"}}
+    ]
+    """
+    try:
+        response = deepseek_client.chat.completions.create(
+            model="tngtech/deepseek-r1t2-chimera:free",
+            messages=[{"role": "user", "content": prompt}],
+        )
+        content = response.choices[0].message.content
+        return limpar_json_ia(content, tipo_lista=True) or []
+    except Exception as e:
+        st.error(f"Erro na API DeepSeek (Flashcards): {e}")
+        return []
+
 # -------------------------------
-# 💾 Salvar no Supabase
+# 💾 Funções do Supabase
 # -------------------------------
 def salvar_quiz(disciplina, nome, questoes):
     try:
@@ -158,52 +154,54 @@ def salvar_quiz(disciplina, nome, questoes):
             "id": str(uuid.uuid4()),
             "nome": nome,
             "disciplina": disciplina,
-            "questoes": json.dumps(questoes), # Salva como string JSON
+            "questoes": json.dumps(questoes),
         }
         supabase.table("quizzes").insert(data).execute()
         return True
     except Exception as e:
-        st.error(f"Erro ao salvar no Supabase: {e}")
+        st.error(f"Erro ao salvar o quiz no Supabase: {e}")
+        return False
+
+def salvar_flashcard_deck(disciplina, nome, cards):
+    """NOVA FUNÇÃO para salvar baralhos."""
+    try:
+        data = {
+            "id": str(uuid.uuid4()),
+            "nome": nome,
+            "disciplina": disciplina,
+            "cards": json.dumps(cards),
+        }
+        supabase.table("flashcard_decks").insert(data).execute()
+        return True
+    except Exception as e:
+        st.error(f"Erro ao salvar o baralho no Supabase: {e}")
+        st.info("Você criou a tabela 'flashcard_decks' conforme as instruções?")
         return False
 
 # -------------------------------
-# 🎯 Função reutilizável: Responder Quiz
+# 🎯 Funções de Renderização de UI
 # -------------------------------
-def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
-    """
-    Renderiza a interface para responder um quiz.
-    'disciplina_nome' é usado para taguear erros.
-    """
-    
-    if isinstance(questoes, str):
-        try:
-            questoes_list = json.loads(questoes)
-        except json.JSONDecodeError:
-            st.error("Formato de quiz inválido.")
-            return
-    elif isinstance(questoes, list):
-        questoes_list = questoes
-    else:
-        st.error("Formato de quiz desconhecido.")
-        return
 
-    if not questoes_list:
-        st.warning("Este quiz não contém questões.")
-        return
+def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
+    """Renderiza a interface para responder um quiz."""
+    if isinstance(questoes, str):
+        try: questoes_list = json.loads(questoes)
+        except json.JSONDecodeError:
+            st.error("Formato de quiz inválido."); return
+    elif isinstance(questoes, list): questoes_list = questoes
+    else: st.error("Formato de quiz desconhecido."); return
+
+    if not questoes_list: st.warning("Este quiz não contém questões."); return
 
     st.subheader("Responda as questões:")
-    
     for i, q in enumerate(questoes_list):
         if not isinstance(q, dict) or "pergunta" not in q or "opcoes" not in q:
-            st.warning(f"Ignorando questão {i+1} (formato inválido).")
-            continue
+            st.warning(f"Ignorando questão {i+1} (formato inválido)."); continue
 
         st.write(f"**{i+1}. {q['pergunta']}**")
-        
         opcoes = q.get("opcoes", [])
         if not isinstance(opcoes, list) or not opcoes:
-             st.write("Esta questão não tem opções.")
-             continue
+             st.write("Esta questão não tem opções."); continue
              
         resposta = st.radio("Escolha uma opção:", opcoes, key=f"q{i}")
         
@@ -215,10 +213,8 @@ def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
                 st.success("✅ Correto!")
             else:
                 st.error(f"❌ Incorreto. Resposta correta: {correta_prefix}")
-                if q.get("justificativa"):
-                    st.info(f"**Justificativa:** {q['justificativa']}")
+                if q.get("justificativa"): st.info(f"**Justificativa:** {q['justificativa']}")
                 
-                # Log de erros com tagueamento de disciplina
                 error_entry = {
                     "pergunta": q["pergunta"],
                     "sua_resposta": resposta,
@@ -228,268 +224,360 @@ def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
                 }
                 if error_entry not in st.session_state.error_log:
                     st.session_state.error_log.append(error_entry)
-        
         st.divider()
 
-    # Botão de voltar só aparece em quizzes temporários ou quizzes abertos
     if is_temp:
-        if st.button("Voltar para Home"):
-            st.session_state.quiz_to_take = None
-            st.rerun()
+        if st.button("Voltar para Home"): st.session_state.quiz_to_take = None; st.rerun()
     elif "selected_quiz_id" in st.session_state and st.session_state.selected_quiz_id:
-         if st.button("Voltar para lista de quizzes"):
-            st.session_state.selected_quiz_id = None
+         if st.button("Voltar para lista de quizzes"): st.session_state.selected_quiz_id = None; st.rerun()
+
+
+def render_flashcard_viewer(deck_data):
+    """NOVA FUNÇÃO: Renderiza o visualizador de flashcards para um baralho."""
+    
+    st.subheader(f"Revisando: {deck_data['nome']}")
+    st.caption(f"Disciplina: {deck_data['disciplina']}")
+    st.divider()
+
+    try:
+        if isinstance(deck_data['cards'], str):
+            cards_list = json.loads(deck_data['cards'])
+        else:
+            cards_list = deck_data['cards']
+    except json.JSONDecodeError:
+        st.error("Formato de cards inválido.")
+        return
+
+    if not cards_list:
+        st.warning("Este baralho não contém flashcards.")
+        return
+
+    total_cards = len(cards_list)
+
+    # Garantir que o índice é válido
+    if st.session_state.flashcard_index >= total_cards:
+        st.session_state.flashcard_index = 0
+        st.session_state.flashcard_flipped = False
+
+    current_card = cards_list[st.session_state.flashcard_index]
+    st.caption(f"Card {st.session_state.flashcard_index + 1} de {total_cards}")
+
+    with st.container(border=True):
+        container_style = "min-height: 250px; padding: 20px;"
+        st.markdown(f'<div style="{container_style}">', unsafe_allow_html=True)
+
+        if not st.session_state.flashcard_flipped:
+            st.subheader("FRENTE:")
+            st.write(current_card["frente"])
+        else:
+            st.subheader("VERSO:")
+            st.success(current_card["verso"])
+        
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    st.divider()
+    col1, col2, col3 = st.columns([2, 3, 2])
+    with col1:
+        if st.button("⬅️ Anterior", use_container_width=True):
+            st.session_state.flashcard_index = (st.session_state.flashcard_index - 1) % total_cards
+            st.session_state.flashcard_flipped = False
+            st.rerun()
+    with col2:
+        if st.button("🔄 Virar Card", use_container_width=True):
+            st.session_state.flashcard_flipped = not st.session_state.flashcard_flipped
+            st.rerun()
+    with col3:
+        if st.button("Próximo ➡️", use_container_width=True):
+            st.session_state.flashcard_index = (st.session_state.flashcard_index + 1) % total_cards
+            st.session_state.flashcard_flipped = False
             st.rerun()
 
+    if st.button("Voltar para lista de baralhos"):
+        st.session_state.selected_deck_id = None
+        st.session_state.flashcard_index = 0
+        st.session_state.flashcard_flipped = False
+        st.rerun()
 
 # -------------------------------
 # 🏠 Página Home (Geração)
 # -------------------------------
 def render_home_page():
 
-    # Estado 0: Se o usuário clicou em "Responder Agora"
+    # Estado 0: Se o usuário clicou em "Responder Agora" (Quiz Rápido)
     if st.session_state.quiz_to_take:
         st.header("🎯 Responder Quiz (Temporário)")
         render_quiz_taker(st.session_state.quiz_to_take, is_temp=True)
         return
 
     st.title("🧠 QuizIA")
-    st.subheader("Gere um quiz interativo com a IA")
+    st.subheader("Gere um quiz interativo ou flashcards com IA")
     st.markdown("---")
 
-    # Estado 3: Mostrar formulário para salvar
+    # Estado 4: Formulário de Salvamento (Unificado)
     if st.session_state.show_save_form:
-        st.header("💾 Salvar Quiz")
+        tipo = st.session_state.show_save_form # 'quiz' ou 'deck'
+        nome_tipo = "Quiz" if tipo == 'quiz' else "Baralho"
+        
+        st.header(f"💾 Salvar {nome_tipo}")
         with st.form("save_form"):
             disciplina = st.text_input("Nome da Matéria *")
-            nome_quiz = st.text_input("Nome do Quiz *")
+            nome_item = st.text_input(f"Nome do {nome_tipo} *")
             submitted = st.form_submit_button("Confirmar e Salvar")
             
             if submitted:
-                if not disciplina or not nome_quiz:
+                if not disciplina or not nome_item:
                     st.error("Por favor, preencha todos os campos obrigatórios.")
                 else:
-                    questoes = st.session_state.generated_questions
-                    if salvar_quiz(disciplina, nome_quiz, questoes):
-                        st.success(f"Quiz '{nome_quiz}' salvo com sucesso! Acesse-o na aba 'Disciplinas'.")
-                        st.session_state.generated_questions = None
-                        st.session_state.show_save_form = False
+                    success = False
+                    if tipo == 'quiz':
+                        success = salvar_quiz(disciplina, nome_item, st.session_state.generated_quiz)
+                    elif tipo == 'deck':
+                        success = salvar_flashcard_deck(disciplina, nome_item, st.session_state.generated_flashcards)
+                    
+                    if success:
+                        st.success(f"{nome_tipo} '{nome_item}' salvo com sucesso! Acesse-o na aba 'Disciplinas'.")
+                        st.session_state.generated_quiz = None
+                        st.session_state.generated_flashcards = None
+                        st.session_state.show_save_form = None
                         st.rerun()
                     
         if st.button("Cancelar"):
-            st.session_state.show_save_form = False
+            st.session_state.show_save_form = None
             st.rerun()
 
-    # Estado 2: Mostrar questões geradas e opções
-    elif st.session_state.generated_questions:
+    # Estado 3: Revisão do Quiz Gerado
+    elif st.session_state.generated_quiz:
         st.header("Questões Geradas com Sucesso!")
-        st.json(st.session_state.generated_questions)
+        num_questoes = len(st.session_state.generated_quiz)
+        st.success(f"✅ Sucesso! {num_questoes} questões foram geradas.")
+        st.info("O que você gostaria de fazer agora?")
         st.markdown("---")
         
         col1, col2 = st.columns(2)
         if col1.button("💾 Salvar Quiz", use_container_width=True):
-            st.session_state.show_save_form = True
+            st.session_state.show_save_form = 'quiz' # Define o tipo
             st.rerun()
         if col2.button("🎯 Responder Agora (Sem Salvar)", use_container_width=True):
-            st.session_state.quiz_to_take = st.session_state.generated_questions
-            st.session_state.generated_questions = None 
+            st.session_state.quiz_to_take = st.session_state.generated_quiz
+            st.session_state.generated_quiz = None
             st.rerun()
+        if st.button("Descartar", use_container_width=True):
+            st.session_state.generated_quiz = None; st.rerun()
 
-    # Estado 1: Mostrar opções de entrada (Upload/Texto)
+    # Estado 3: Revisão dos Flashcards Gerados
+    elif st.session_state.generated_flashcards:
+        st.header("Flashcards Gerados com Sucesso!")
+        num_cards = len(st.session_state.generated_flashcards)
+        st.success(f"✅ Sucesso! {num_cards} flashcards foram gerados.")
+        st.info("Salve este baralho para poder revisá-lo na aba 'Disciplinas'.")
+        
+        # Mostra uma prévia
+        st.write("**Prévia:**")
+        for card in st.session_state.generated_flashcards[:3]: # Mostra os 3 primeiros
+            st.write(f"**Frente:** {card['frente']}")
+            st.write(f"**Verso:** {card['verso']}")
+            st.divider()
+        
+        st.markdown("---")
+        
+        col1, col2 = st.columns(2)
+        if col1.button("💾 Salvar Baralho", use_container_width=True):
+            st.session_state.show_save_form = 'deck' # Define o tipo
+            st.rerun()
+        if col2.button("Descartar", use_container_width=True):
+            st.session_state.generated_flashcards = None; st.rerun()
+
+    # Estado 1: Entrada de Conteúdo
     else:
-        # --- NOVO: Guia para usuários ---
-        st.info("Procurando seus quizzes salvos? 📚 Acesse a aba **Disciplinas** no menu à esquerda.")
-        st.markdown("---")
-        # --- FIM DA MUDANÇA ---
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            if st.button("⬆️ Upload do Arquivo", use_container_width=True):
-                st.session_state.input_method = "upload"
-        with col2:
-            if st.button("⌨️ Inserir o Texto", use_container_width=True):
-                st.session_state.input_method = "text"
-        
+        st.info("Procurando seus quizzes e baralhos salvos? 📚 Acesse a aba **Disciplinas** no menu.")
         st.markdown("---")
 
-        uploaded_file = None
-        texto_manual = ""
-
-        if st.session_state.input_method == "upload":
-            uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"], label_visibility="visible")
+        # Método de entrada (Upload ou Texto)
+        input_tabs = st.tabs(["⬆️ Upload de Arquivo", "⌨️ Inserir Texto"])
         
-        if st.session_state.input_method == "text":
-            texto_manual = st.text_area("Cole o conteúdo aqui", height=250, placeholder="Insira seu texto...")
+        with input_tabs[0]:
+            uploaded_file = st.file_uploader("Envie um PDF", type=["pdf"], label_visibility="collapsed")
+        
+        with input_tabs[1]:
+            texto_manual = st.text_area("Cole o conteúdo aqui", height=250, placeholder="Insira seu texto...", label_visibility="collapsed")
 
-        if st.session_state.input_method and st.button("🚀 Gerar Questões"):
-            with st.spinner("Gerando questões com IA... (Isso pode levar um tempo)"):
-                texto = ""
-                if uploaded_file:
-                    texto = extract_text_from_pdf(uploaded_file)
-                elif texto_manual:
-                    texto = texto_manual
-                else:
-                    st.warning("Envie um PDF ou insira texto!")
-                    st.stop()
-                
-                if not texto:
-                    st.error("Não foi possível extrair texto do conteúdo.")
-                    st.stop()
+        st.markdown("---")
+        st.subheader("O que você quer criar com este material?")
 
+        col1, col2 = st.columns(2)
+        
+        # Botão Gerar Quiz
+        if col1.button("🚀 Gerar Quiz", use_container_width=True):
+            texto, tipo = (extract_text_from_pdf(uploaded_file), "PDF") if uploaded_file else (texto_manual, "Texto")
+            if not texto: st.warning("Por favor, envie um PDF ou insira texto."); st.stop()
+            
+            with st.spinner("Gerando quiz... (Isso pode levar um tempo)"):
                 chunks = chunk_text(texto)
                 questoes_final = []
-
                 progress_bar = st.progress(0, text="Processando partes do texto...")
-
                 for i, chunk in enumerate(chunks):
-                    st.info(f"🔹 Processando parte {i+1}/{len(chunks)}...")
+                    st.info(f"🔹 Processando (Quiz) parte {i+1}/{len(chunks)}...")
                     q = gerar_questoes_deepseek(chunk)
-                    
-                    if q: # Só refina se o deepseek retornar algo
-                        q_refinado = refinar_questoes_llama(q)
-                        questoes_final.extend(q_refinado)
-                    
+                    if q: q_refinado = refinar_questoes_llama(q); questoes_final.extend(q_refinado)
                     progress_bar.progress((i + 1) / len(chunks), text=f"Parte {i+1}/{len(chunks)} processada")
-                    time.sleep(1) # Evita sobrecarga da API
-
+                    time.sleep(1)
+                
                 if questoes_final:
-                    st.session_state.generated_questions = questoes_final
-                    st.session_state.input_method = None # Reseta o método de input
+                    st.session_state.generated_quiz = questoes_final
                     st.rerun()
-                else:
-                    st.error("Não foi possível gerar nenhuma questão. Verifique o conteúdo ou tente novamente.")
+                else: st.error("Não foi possível gerar nenhuma questão.")
+
+        # Botão Gerar Flashcards
+        if col2.button("🗂️ Gerar Flashcards", use_container_width=True):
+            texto, tipo = (extract_text_from_pdf(uploaded_file), "PDF") if uploaded_file else (texto_manual, "Texto")
+            if not texto: st.warning("Por favor, envie um PDF ou insira texto."); st.stop()
+            
+            with st.spinner("Gerando flashcards..."):
+                chunks = chunk_text(texto)
+                cards_final = []
+                progress_bar = st.progress(0, text="Processando partes do texto...")
+                for i, chunk in enumerate(chunks):
+                    st.info(f"🔹 Processando (Cards) parte {i+1}/{len(chunks)}...")
+                    cards = gerar_flashcards_ia(chunk)
+                    if cards: cards_final.extend(cards)
+                    progress_bar.progress((i + 1) / len(chunks), text=f"Parte {i+1}/{len(chunks)} processada")
+                    time.sleep(1)
+                
+                if cards_final:
+                    st.session_state.generated_flashcards = cards_final
+                    st.rerun()
+                else: st.error("Não foi possível gerar nenhum flashcard.")
 
 # -------------------------------
-# 📚 Página Disciplinas
+# 📚 Página Disciplinas (Biblioteca)
 # -------------------------------
 def render_disciplinas_page():
-    st.header("📚 Minhas Disciplinas e Quizzes")
+    st.header("📚 Minhas Disciplinas")
 
-    # --- LÓGICA DE NAVEGAÇÃO: Se um quiz for selecionado, mostre-o
+    # --- LÓGICA DE NAVEGAÇÃO 1: Mostrar Visualizador de Flashcard
+    if st.session_state.selected_deck_id:
+        try:
+            deck_data = supabase.table("flashcard_decks").select("*").eq("id", st.session_state.selected_deck_id).single().execute()
+            if deck_data.data:
+                render_flashcard_viewer(deck_data.data)
+            else: st.error("Não foi possível carregar o baralho."); st.session_state.selected_deck_id = None
+        except Exception as e:
+            st.error(f"Erro ao buscar baralho: {e}"); st.session_state.selected_deck_id = None
+        return
+
+    # --- LÓGICA DE NAVEGAÇÃO 2: Mostrar Visualizador de Quiz
     if st.session_state.selected_quiz_id:
         try:
             quiz_data = supabase.table("quizzes").select("nome, questoes, disciplina").eq("id", st.session_state.selected_quiz_id).single().execute()
-            
             if quiz_data.data:
                 st.subheader(f"Respondendo: {quiz_data.data['nome']}")
                 st.caption(f"Disciplina: {quiz_data.data['disciplina']}")
                 st.divider()
-                render_quiz_taker(
-                    quiz_data.data["questoes"], 
-                    disciplina_nome=quiz_data.data["disciplina"], 
-                    is_temp=False
-                )
-            else:
-                st.error("Não foi possível carregar o quiz selecionado.")
-                st.session_state.selected_quiz_id = None # Limpa ID inválido
-
+                render_quiz_taker(quiz_data.data["questoes"], disciplina_nome=quiz_data.data["disciplina"], is_temp=False)
+            else: st.error("Não foi possível carregar o quiz."); st.session_state.selected_quiz_id = None
         except Exception as e:
-            st.error(f"Erro ao buscar quiz: {e}")
-            st.session_state.selected_quiz_id = None
-        return # Para a execução aqui para mostrar apenas o quiz
+            st.error(f"Erro ao buscar quiz: {e}"); st.session_state.selected_quiz_id = None
+        return
 
-    # --- LÓGICA DE NAVEGAÇÃO: Se uma disciplina for selecionada, mostre os detalhes
+    # --- LÓGICA DE NAVEGAÇÃO 3: Mostrar Detalhes da Disciplina (Abas)
     if st.session_state.selected_disciplina:
         if st.button("← Voltar para todas as disciplinas"):
-            st.session_state.selected_disciplina = None
-            st.rerun()
+            st.session_state.selected_disciplina = None; st.rerun()
         
         st.header(f"Disciplina: {st.session_state.selected_disciplina}")
-
-        # Abas internas da disciplina
-        tab_quiz, tab_flash, tab_erros = st.tabs(["🎓 Quizzes", "🗂️ Flashcards", "❌ Revisão de Erros"])
+        
+        # Abas internas
+        tab_quiz, tab_flash, tab_erros = st.tabs(["🎓 Quizzes", "🗂️ Flashcards de Estudo", "❌ Revisão de Erros"])
 
         with tab_quiz:
             st.subheader(f"Quizzes de {st.session_state.selected_disciplina}")
             try:
-                # Busca quizzes APENAS para esta disciplina
                 quizzes_disc = supabase.table("quizzes").select("id, nome").eq("disciplina", st.session_state.selected_disciplina).execute()
-                
-                if not quizzes_disc.data:
-                    st.info("Nenhum quiz encontrado para esta disciplina.")
+                if not quizzes_disc.data: st.info("Nenhum quiz encontrado para esta disciplina.")
                 else:
                     for quiz in quizzes_disc.data:
                         if st.button(quiz["nome"], key=f"quiz_{quiz['id']}", use_container_width=True):
-                            st.session_state.selected_quiz_id = quiz["id"]
-                            st.rerun() # Recarrega a página para mostrar o quiz taker
-
-            except Exception as e:
-                st.error(f"Erro ao buscar quizzes da disciplina: {e}")
+                            st.session_state.selected_quiz_id = quiz["id"]; st.rerun()
+            except Exception as e: st.error(f"Erro ao buscar quizzes: {e}")
 
         with tab_flash:
-            st.info("Flashcards (Em construção... 🏗️)")
-            st.write("Aqui ficarão os flashcards gerados para esta disciplina.")
+            st.subheader(f"Baralhos de {st.session_state.selected_disciplina}")
+            try:
+                decks_disc = supabase.table("flashcard_decks").select("id, nome").eq("disciplina", st.session_state.selected_disciplina).execute()
+                if not decks_disc.data: st.info("Nenhum baralho de flashcards encontrado para esta disciplina.")
+                else:
+                    for deck in decks_disc.data:
+                        if st.button(deck["nome"], key=f"deck_{deck['id']}", use_container_width=True):
+                            st.session_state.selected_deck_id = deck["id"]; st.rerun()
+            except Exception as e: st.error(f"Erro ao buscar baralhos: {e}")
 
         with tab_erros:
-            st.info("Revisão de Erros (Em construção... 🏗️)")
-            st.write("Aqui ficará a revisão de erros específica para esta disciplina.")
-            # Lógica futura: Filtrar st.session_state.error_log
+            st.subheader("Revisão de Erros da Disciplina")
             erros_disciplina = [e for e in st.session_state.error_log if e["disciplina"] == st.session_state.selected_disciplina]
-            if not erros_disciplina:
-                st.write("Nenhum erro registrado para esta disciplina ainda.")
+            if not erros_disciplina: st.info("Nenhum erro registrado para esta disciplina ainda.")
             else:
-                st.write(f"{len(erros_disciplina)} erros para revisar.")
-                # (A revisão completa ainda está na aba principal "Revisão de Erros")
+                st.write(f"{len(erros_disciplina)} erros para revisar:")
+                for i, erro in enumerate(erros_disciplina):
+                    with st.container(border=True):
+                        st.markdown(f"**{i+1}. {erro['pergunta']}**")
+                        st.error(f"Sua resposta: {erro['sua_resposta']}")
+                        st.success(f"Resposta correta: {erro['resposta_correta']}")
+                        if erro['justificativa'] != "N/A": st.info(f"Justificativa: {erro['justificativa']}")
+                    st.divider()
+        return
 
-
-        return # Para a execução aqui
-
-    # --- LÓGICA DE NAVEGAÇÃO: Nenhuma disciplina selecionada, mostrar os CARDS
+    # --- LÓGICA DE NAVEGAÇÃO 4: Mostrar Cards de Disciplina (Padrão)
     try:
-        quizzes = supabase.table("quizzes").select("id, nome, disciplina").execute()
+        # Busca ambas as tabelas
+        quizzes = supabase.table("quizzes").select("disciplina").execute()
+        decks = supabase.table("flashcard_decks").select("disciplina").execute()
         
-        if not quizzes.data:
-            st.warning("Nenhum quiz salvo encontrado. Crie um na página Home!")
-            return
+        disciplinas = set()
+        if quizzes.data: disciplinas.update([q["disciplina"] for q in quizzes.data])
+        if decks.data: disciplinas.update([d["disciplina"] for d in decks.data])
 
-        disciplinas = {}
-        for q in quizzes.data:
-            disc = q["disciplina"]
-            if disc not in disciplinas:
-                disciplinas[disc] = []
-            disciplinas[disc].append(q)
+        if not disciplinas:
+            st.warning("Nenhuma disciplina encontrada. Crie um quiz ou baralho na página Home!"); return
 
-        # Renderiza os CARDS de disciplina
-        for disc_nome, quizzes_list in disciplinas.items():
+        for disc_nome in sorted(list(disciplinas)):
             with st.container(border=True):
                 st.subheader(disc_nome)
-                st.write(f"{len(quizzes_list)} quizzes salvos.")
                 if st.button("Abrir Disciplina", key=f"open_{disc_nome}"):
                     st.session_state.selected_disciplina = disc_nome
                     st.rerun()
-            st.markdown("---") # Espaçador
+            st.markdown("---")
 
-    except Exception as e:
-        st.error(f"Erro ao buscar quizzes: {e}")
-
+    except Exception as e: st.error(f"Erro ao buscar disciplinas: {e}")
 
 # -------------------------------
 # ❌ Página Revisão de Erros
 # -------------------------------
 def render_revisao_page():
-    st.header("❌ Revisão de Erros")
+    st.header("❌ Revisão de Erros (de Quizzes)")
     
     if not st.session_state.error_log:
-        st.info("Você ainda não errou nenhuma questão. Ótimo trabalho!")
-        return
+        st.info("Você ainda não errou nenhuma questão de quiz. Ótimo trabalho!"); return
 
     if st.button("Limpar Histórico de Erros"):
-        st.session_state.error_log = []
-        st.rerun()
+        st.session_state.error_log = []; st.session_state.filtro_revisao = "Todas"; st.rerun()
 
-    # --- Lógica de Filtro ---
     disciplinas_com_erro = sorted(list(set(e["disciplina"] for e in st.session_state.error_log)))
-    filtro_disciplina = st.selectbox("Filtrar por Disciplina:", ["Todas"] + disciplinas_com_erro)
+    opcoes_filtro = ["Todas"] + disciplinas_com_erro
+    indice_filtro = 0
+    if st.session_state.filtro_revisao in opcoes_filtro:
+        indice_filtro = opcoes_filtro.index(st.session_state.filtro_revisao)
+
+    filtro_disciplina = st.selectbox("Filtrar por Disciplina:", opcoes_filtro, index=indice_filtro, key="filtro_selectbox")
+    
+    if 'filtro_selectbox' in st.session_state and st.session_state.filtro_selectbox != st.session_state.filtro_revisao:
+        st.session_state.filtro_revisao = st.session_state.filtro_selectbox; st.rerun()
 
     st.subheader("Questões que você errou:")
-    
     erros_filtrados = st.session_state.error_log
     if filtro_disciplina != "Todas":
         erros_filtrados = [e for e in st.session_state.error_log if e["disciplina"] == filtro_disciplina]
 
-    if not erros_filtrados:
-        st.info("Nenhum erro encontrado para esta disciplina.")
-        return
+    if not erros_filtrados: st.info("Nenhum erro encontrado para esta disciplina."); return
 
     for i, erro in enumerate(erros_filtrados):
         with st.container(border=True):
@@ -501,21 +589,12 @@ def render_revisao_page():
         st.divider()
 
 # -------------------------------
-# 🗂️ Página Flashcards (Placeholder)
-# -------------------------------
-def render_flashcards_page():
-    st.header("🗂️ Flashcards")
-    st.info("Em construção... 🏗️")
-    st.write("Esta seção permitirá revisar os conceitos das questões erradas em formato de flashcards.")
-
-# -------------------------------
 # ⚙️ Página Configurar (Placeholder)
 # -------------------------------
 def render_configurar_page():
     st.header("⚙️ Configurar Estilo e Dificuldade")
     st.info("Em construção... 🏗️")
     st.write("Aqui você poderá ajustar a dificuldade das questões (ex: mais difíceis, conceituais) e o estilo (ex: 'complete a lacuna', 'verdadeiro ou falso').")
-
 
 # -------------------------------
 # 🧩 Interface Principal Streamlit
@@ -525,53 +604,53 @@ st.set_page_config(page_title="QuizIA", layout="wide")
 # -------------------------------
 # 💾 Inicialização do st.session_state
 # -------------------------------
-if "page" not in st.session_state:
-    st.session_state.page = "Home"
-if "input_method" not in st.session_state:
-    st.session_state.input_method = None
-if "generated_questions" not in st.session_state:
-    st.session_state.generated_questions = None
-if "show_save_form" not in st.session_state:
-    st.session_state.show_save_form = False
-if "quiz_to_take" not in st.session_state:
-    st.session_state.quiz_to_take = None
-if "error_log" not in st.session_state:
-    st.session_state.error_log = []
-if "selected_quiz_id" not in st.session_state:
-    st.session_state.selected_quiz_id = None
-if "selected_disciplina" not in st.session_state:
-    st.session_state.selected_disciplina = None
-
+if "page" not in st.session_state: st.session_state.page = "Home"
+if "generated_quiz" not in st.session_state: st.session_state.generated_quiz = None
+if "generated_flashcards" not in st.session_state: st.session_state.generated_flashcards = None # NOVO
+if "show_save_form" not in st.session_state: st.session_state.show_save_form = None # MUDANÇA: None/quiz/deck
+if "quiz_to_take" not in st.session_state: st.session_state.quiz_to_take = None
+if "error_log" not in st.session_state: st.session_state.error_log = []
+if "selected_quiz_id" not in st.session_state: st.session_state.selected_quiz_id = None
+if "selected_deck_id" not in st.session_state: st.session_state.selected_deck_id = None # NOVO
+if "selected_disciplina" not in st.session_state: st.session_state.selected_disciplina = None
+if "filtro_revisao" not in st.session_state: st.session_state.filtro_revisao = "Todas"
+if "flashcard_index" not in st.session_state: st.session_state.flashcard_index = 0 # (Usado pelo viewer)
+if "flashcard_flipped" not in st.session_state: st.session_state.flashcard_flipped = False # (Usado pelo viewer)
 
 # -------------------------------
 # 🧭 Navegação Sidebar
 # -------------------------------
+def reset_home_states():
+    st.session_state.generated_quiz = None
+    st.session_state.generated_flashcards = None
+    st.session_state.show_save_form = None
+    st.session_state.quiz_to_take = None
+    st.session_state.selected_quiz_id = None
+    st.session_state.selected_disciplina = None
+    st.session_state.selected_deck_id = None
+    st.session_state.filtro_revisao = "Todas"
+    st.session_state.flashcard_index = 0
+    st.session_state.flashcard_flipped = False
+
 with st.sidebar:
     st.title("Menu QuizIA")
     
     if st.button("🏠 Home", use_container_width=True):
         st.session_state.page = "Home"
-        st.session_state.input_method = None
-        st.session_state.generated_questions = None
-        st.session_state.show_save_form = False
-        st.session_state.quiz_to_take = None
-        st.session_state.selected_quiz_id = None
-        st.session_state.selected_disciplina = None # Reset
+        reset_home_states()
         st.rerun()
 
     if st.button("📚 Disciplinas", use_container_width=True):
         st.session_state.page = "Disciplinas"
-        st.session_state.selected_quiz_id = None 
-        st.session_state.selected_disciplina = None # Reset
+        reset_home_states()
         st.rerun()
 
     if st.button("❌ Revisão de erros", use_container_width=True):
         st.session_state.page = "Revisão de erros"
+        st.session_state.filtro_revisao = "Todas" # Reseta só o filtro
         st.rerun()
 
-    if st.button("🗂️ Flashcards", use_container_width=True):
-        st.session_state.page = "Flashcards"
-        st.rerun()
+    # Botão "Flashcards" foi REMOVIDO da sidebar
 
     if st.button("⚙️ Configurar", use_container_width=True):
         st.session_state.page = "Configurar"
@@ -586,7 +665,5 @@ elif st.session_state.page == "Disciplinas":
     render_disciplinas_page()
 elif st.session_state.page == "Revisão de erros":
     render_revisao_page()
-elif st.session_state.page == "Flashcards":
-    render_flashcards_page()
 elif st.session_state.page == "Configurar":
     render_configurar_page()
