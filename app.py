@@ -1,192 +1,149 @@
 import streamlit as st
-import time
 import json
-from supabase import create_client, Client
+import time
+import requests
 
-# --- Configurações ---
-st.set_page_config(page_title="Quizia Pro+", layout="wide")
+# =====================================================
+# CONFIGURAÇÕES INICIAIS
+# =====================================================
 
-# --- Inicialização do Supabase ---
-SUPABASE_URL = st.secrets["SUPABASE_URL"]
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+st.set_page_config(page_title="QuizIA", layout="centered")
 
-# --- Funções do Supabase ---
-def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
-    try:
-        for q in questoes:
-            data = {
-                "nome_quiz": nome_quiz,
-                "disciplina": disciplina,
-                "estilo": q.get("estilo"),
-                "pergunta": q.get("pergunta") or q.get("texto_base") or q.get("pergunta_guia"),
-                "opcoes": json.dumps(q.get("opcoes", []), ensure_ascii=False),
-                "resposta_correta": q.get("resposta_correta") or ", ".join(q.get("respostas_aceitaveis", [])),
-                "justificativa": q.get("justificativa", ""),
-                "contexto_citado": q.get("contexto_citado", ""),
-                "dificuldade": q.get("dificuldade", "Desconhecida")
-            }
-            supabase.table("quizzes").insert(data).execute()
-        st.success(f"✅ Questões do quiz '{nome_quiz}' salvas com sucesso!")
-    except Exception as e:
-        st.error(f"Erro ao salvar questões: {e}")
+st.title("🤖 QuizIA - Geração de Questões Inteligentes")
+st.markdown("Crie quizzes automáticos com base no conteúdo de um livro, artigo ou apostila 📘")
 
-def listar_disciplinas():
-    try:
-        data = supabase.table("quizzes").select("disciplina").execute().data
-        if data:
-            return sorted(list(set([d["disciplina"] for d in data if d["disciplina"]])))
-        return []
-    except Exception as e:
-        st.error(f"Erro ao listar disciplinas: {e}")
-        return []
+# =====================================================
+# FUNÇÕES AUXILIARES
+# =====================================================
 
-def listar_questoes_por_disciplina(disciplina):
-    try:
-        return supabase.table("quizzes").select("*").eq("disciplina", disciplina).execute().data
-    except Exception as e:
-        st.error(f"Erro ao buscar questões: {e}")
-        return []
+def dividir_em_chunks(texto, tamanho_chunk=2000, sobreposicao=200):
+    """
+    Divide o texto em partes menores mantendo contexto.
+    """
+    palavras = texto.split()
+    chunks = []
+    for i in range(0, len(palavras), tamanho_chunk - sobreposicao):
+        parte = " ".join(palavras[i:i + tamanho_chunk])
+        chunks.append(parte)
+    return chunks
 
-# --- Tela Inicial ---
-st.title("🤖 Quizia Pro+")
-st.markdown("Plataforma de geração inteligente de quizzes com IA e Supabase.")
 
-uploaded_file = st.file_uploader("📤 Envie o PDF do livro ou apostila", type=["pdf"])
+def gerar_questoes_com_ia(conteudo, disciplina):
+    """
+    Chama a API (simulada aqui) para gerar questões de múltipla escolha com justificativa.
+    Retorna uma lista de dicionários contendo:
+    pergunta, opcoes, resposta_correta, justificativa
+    """
+    # Simulação de chamada de API
+    # Você pode substituir esta parte por uma chamada real ao seu endpoint LLM.
+    time.sleep(2)
+    questoes = [
+        {
+            "pergunta": "Qual é o objetivo principal da camada de transporte em redes de computadores?",
+            "opcoes": [
+                "A) Fornecer comunicação lógica entre processos de aplicação em hosts diferentes",
+                "B) Garantir a transmissão física de dados através do meio",
+                "C) Definir endereçamento IP para roteamento de pacotes",
+                "D) Controlar o acesso múltiplo ao meio físico"
+            ],
+            "resposta_correta": "A",
+            "justificativa": "A camada de transporte fornece comunicação lógica entre processos de aplicação em hosts diferentes, conforme descrito no livro."
+        },
+        {
+            "pergunta": "Qual destes protocolos oferece entrega confiável e controle de congestionamento?",
+            "opcoes": [
+                "A) UDP",
+                "B) IP",
+                "C) TCP",
+                "D) ARP"
+            ],
+            "resposta_correta": "C",
+            "justificativa": "O protocolo TCP é orientado à conexão e fornece entrega confiável e controle de congestionamento."
+        }
+    ]
+    return questoes
 
-if uploaded_file:
-    st.info("Arquivo carregado com sucesso! Clique em 'Gerar Questões' para iniciar.")
 
-    if st.button("🚀 Gerar Questões"):
-        with st.spinner("Gerando questões com IA... Isso pode levar alguns segundos."):
-            progress = st.progress(0)
-            for i in range(100):
-                time.sleep(0.03)
-                progress.progress(i + 1)
+def gerar_questoes_para_todo_texto(texto, disciplina):
+    """
+    Gera questões para cada chunk do texto, com barra de progresso e feedback visual.
+    """
+    chunks = dividir_em_chunks(texto)
+    todas_questoes = []
 
-        # Simulação de retorno de IA
-        questoes_geradas = [
-            {"pergunta": "O que é uma variável em Python?", 
-             "opcoes": ["Um tipo de dado", "Um valor fixo", "Um espaço nomeado para armazenar dados"],
-             "resposta_correta": "Um espaço nomeado para armazenar dados",
-             "justificativa": "De acordo com o livro, uma variável é usada para armazenar valores temporariamente durante a execução do programa."}
-        ]
+    barra = st.progress(0)
+    total_chunks = len(chunks)
 
-        nome_quiz = st.text_input("Nome do Quiz:")
-        disciplina = st.selectbox("Selecione a disciplina:", listar_disciplinas() + ["Nova disciplina"])
-        if disciplina == "Nova disciplina":
-            disciplina = st.text_input("Digite o nome da nova disciplina:")
+    for i, chunk in enumerate(chunks):
+        st.info(f"🔍 Gerando questões do trecho {i+1}/{total_chunks}...")
+        questoes_chunk = gerar_questoes_com_ia(chunk, disciplina)
+        todas_questoes.extend(questoes_chunk)
+        barra.progress((i + 1) / total_chunks)
+        time.sleep(0.3)
 
-        if st.button("💾 Salvar Quiz"):
-            salvar_questoes_no_supabase(nome_quiz, disciplina, questoes_geradas)
+    st.success(f"✅ {len(todas_questoes)} questões geradas com sucesso!")
+    return todas_questoes
 
-# ==========================================================
-# MENU LATERAL
-# ==========================================================
-st.sidebar.title("📚 Navegação")
-menu = st.sidebar.radio(
-    "Escolha uma opção:",
-    ["Disciplinas", "Flashcards", "Revisão de Erros", "Configurar Estilos", "Configurar Dificuldade"]
-)
 
-# Criar um container limpo para cada aba
-st.session_state.placeholder = st.empty()
+# =====================================================
+# INTERFACE DO APP
+# =====================================================
 
-# ----------------------------------------------------------
-# 📘 1. MENU DISCIPLINAS
-# ----------------------------------------------------------
-if menu == "Disciplinas":
-    with st.session_state.placeholder.container():
-        disciplinas = listar_disciplinas()
-        if not disciplinas:
-            st.info("Nenhuma disciplina cadastrada ainda. Gere um quiz primeiro!")
+aba = st.sidebar.radio("📚 Menu", ["Gerar Questões", "Responder Quiz"])
+
+# =====================================================
+# ABA 1: GERAR QUESTÕES
+# =====================================================
+if aba == "Gerar Questões":
+    st.header("🧠 Gerar Questões a partir de um Texto")
+
+    disciplina = st.text_input("Digite o nome da disciplina:")
+    texto = st.text_area("Cole aqui o conteúdo (ex: texto do livro, resumo ou apostila):", height=300)
+
+    if st.button("Gerar Questões"):
+        if not texto.strip() or not disciplina.strip():
+            st.warning("⚠️ Por favor, preencha todos os campos.")
         else:
-            disciplina = st.selectbox("Selecione uma disciplina:", disciplinas)
-            questoes = listar_questoes_por_disciplina(disciplina)
+            questoes = gerar_questoes_para_todo_texto(texto, disciplina)
 
-            if questoes:
-                st.subheader(f"📖 Questões de {disciplina}")
-                for i, q in enumerate(questoes):
-                    pergunta = (
-                        q.get("pergunta")
-                        or q.get("texto_base")
-                        or q.get("pergunta_guia")
-                        or "Pergunta não disponível"
-                    )
+            st.session_state["questoes_geradas"] = questoes
+            st.success("Questões geradas e salvas na sessão. Vá até a aba **Responder Quiz** para testá-las.")
 
-                    st.markdown(f"**{i+1}. {questoes}**")
 
-                    try:
-                        opcoes = json.loads(q.get("opcoes", "[]"))
-                    except Exception:
-                        opcoes = []
+# =====================================================
+# ABA 2: RESPONDER QUIZ
+# =====================================================
+elif aba == "Responder Quiz":
+    st.header("🎯 Responder Quiz Interativo")
 
-                    if opcoes:
-                        resposta = st.radio(
-                            f"Escolha a resposta da questão {i+1}:",
-                            opcoes,
-                            key=f"resposta_{i}",
-                        )
+    if "questoes_geradas" not in st.session_state:
+        st.warning("⚠️ Nenhum quiz gerado ainda. Vá até a aba 'Gerar Questões' primeiro.")
+    else:
+        questoes = st.session_state["questoes_geradas"]
+        pontuacao = 0
 
-                        # Feedback imediato
-                        correta = q.get("resposta_correta", "").strip()
-                        if resposta:
-                            if resposta.lower() == correta.lower():
-                                st.success("✅ Correto!")
-                            else:
-                                st.error(f"❌ Incorreto! Resposta certa: **{correta}**")
+        for i, q in enumerate(questoes):
+            st.markdown(f"### {i+1}. {q['pergunta']}")
+            escolha = st.radio("Escolha uma opção:", q["opcoes"], key=f"q{i}")
 
-                    st.caption(f"**Dificuldade:** {q.get('dificuldade', 'Desconhecida')}")
-                    st.divider()
+            # Captura a letra da resposta escolhida
+            letra_escolhida = escolha.split(")")[0]
+            if letra_escolhida == q["resposta_correta"]:
+                st.success("✅ Resposta correta!")
+                pontuacao += 1
+            else:
+                st.error(f"❌ Resposta incorreta. A correta é **{q['resposta_correta']}**.")
+            st.markdown(f"📘 *Justificativa:* {q['justificativa']}")
+            st.divider()
 
-# ----------------------------------------------------------
-# 🧩 2. MENU CONFIGURAR ESTILOS
-# ----------------------------------------------------------
-elif menu == "Configurar Estilos":
-    with st.session_state.placeholder.container():
-        st.header("🎨 Estilos de Questões")
-        estilos = st.multiselect(
-            "Selecione os estilos de questões que deseja permitir:",
-            ["Múltipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"],
-            default=["Múltipla Escolha", "Aberta"],
-        )
-        st.session_state.estilos_selecionados = estilos
-        st.success("Estilos atualizados com sucesso!")
+        total = len(questoes)
+        st.subheader("📊 Resultado Final")
+        st.write(f"Você acertou **{pontuacao}/{total}** questões ({pontuacao/total*100:.1f}%)")
 
-# ----------------------------------------------------------
-# ⚙️ 3. MENU CONFIGURAR DIFICULDADE
-# ----------------------------------------------------------
-elif menu == "Configurar Dificuldade":
-    with st.session_state.placeholder.container():
-        st.header("📈 Níveis de Dificuldade")
-        dificuldade = st.selectbox(
-            "Escolha o nível de dificuldade:",
-            ["Aleatório", "Fácil", "Médio", "Difícil"],
-        )
-        st.session_state.dificuldade = dificuldade
-        st.success("Nível de dificuldade configurado!")
-
-# ----------------------------------------------------------
-# 🧠 4. MENU FLASHCARDS
-# ----------------------------------------------------------
-elif menu == "Flashcards":
-    with st.session_state.placeholder.container():
-        st.header("🧠 Flashcards")
-        st.info("Funcionalidade em desenvolvimento. Em breve você poderá revisar conteúdo de forma interativa!")
-
-# ----------------------------------------------------------
-# ❌ 5. MENU REVISÃO DE ERROS
-# ----------------------------------------------------------
-elif menu == "Revisão de Erros":
-    with st.session_state.placeholder.container():
-        st.header("📋 Revisão de Erros")
-        erros = supabase.table("erros").select("*").order("created_at", desc=True).execute().data
-        if not erros:
-            st.info("Nenhum erro registrado ainda.")
+        if pontuacao / total == 1:
+            st.balloons()
+            st.success("🎉 Excelente! Você acertou todas!")
+        elif pontuacao / total >= 0.7:
+            st.info("💪 Bom desempenho! Continue assim.")
         else:
-            for erro in erros:
-                with st.container(border=True):
-                    st.write(f"**Pergunta:** {erro.get('pergunta', '—')}")
-                    st.write(f"**Sua Resposta:** {erro.get('resposta_usuario', '—')}")
-                    st.write(f"**Correta:** {erro.get('resposta_correta', '—')}")
-                    st.caption(erro.get("justificativa", ""))
+            st.warning("📚 Estude um pouco mais e tente novamente!")
