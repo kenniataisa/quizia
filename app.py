@@ -1,27 +1,22 @@
-
 # ==========================================================
-# ðŸ§  QUIZIA PRO+ - VersÃ£o Completa com Supabase e IA
+# 🤖 QUIZIA PRO+ - Versão Completa com Supabase e IA (com Avaliação)
 # ==========================================================
 # Autor: Kennia Taisa
-# Data: 2025
-# DescriÃ§Ã£o:
-#   Aplicativo em Streamlit que gera, avalia e armazena quizzes a partir de PDFs,
-#   com integraÃ§Ã£o ao Supabase e modelos de IA (DeepSeek + Gemma).
+# Descrição:
+#   Geração e avaliação automática de quizzes baseados em PDFs,
+#   integrando DeepSeek e Gemma via OpenRouter + Supabase.
 # ==========================================================
 
 import streamlit as st
-import io
 from pypdf import PdfReader
 import openai
-from supabase import create_client, Client
-import random
+from supabase import create_client
 import os
 from dotenv import load_dotenv
 import json
-import concurrent.futures
 
 # ======================
-# CONFIGURAÃ‡ÃƒO INICIAL
+# CONFIGURAÇÃO INICIAL
 # ======================
 st.set_page_config(page_title="QuizIA Pro+", layout="wide", initial_sidebar_state="expanded")
 load_dotenv()
@@ -31,9 +26,10 @@ supabase_url = os.getenv("SUPABASE_URL") or st.secrets.get("SUPABASE_URL")
 supabase_key = os.getenv("SUPABASE_KEY") or st.secrets.get("SUPABASE_KEY")
 
 if not all([api_key, supabase_url, supabase_key]):
-    st.error("Chaves de API nao configuradas.", icon="🔐")
+    st.error("⚠️ Chaves de API não configuradas corretamente.", icon="🔐")
     st.stop()
 
+# --- Inicializa conexões ---
 supabase = create_client(supabase_url, supabase_key)
 client = openai.OpenAI(
     base_url="https://openrouter.ai/api/v1",
@@ -41,128 +37,183 @@ client = openai.OpenAI(
     default_headers={"HTTP-Referer": "https://quizia.app", "X-Title": "Quizia App"},
 )
 
-# --- MODELOS DE IA (GeraÃ§Ã£o e AvaliaÃ§Ã£o) ---
+# --- Modelos IA ---
 MODELO_GERACAO = "tngtech/deepseek-r1t2-chimera:free"
 MODELO_AVALIACAO = "google/gemma-3-27b-it:free"
 
-def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
+# ==========================================================
+# FUNÇÕES AUXILIARES
+# ==========================================================
+def gerar_questoes(texto, disciplina):
+    """Gera questões usando DeepSeek"""
+    prompt = f"""
+    Gere 5 questões objetivas de {disciplina} com 4 alternativas.
+    Retorne APENAS um JSON válido no formato:
+    [
+      {{
+        "pergunta": "...",
+        "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
+        "resposta_correta": "A",
+        "justificativa": "..."
+      }}
+    ]
+    Texto base:
+    {texto[:4000]}
+    """
+    resposta = client.chat.completions.create(
+        model=MODELO_GERACAO,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return json.loads(resposta.choices[0].message.content)
+
+
+def avaliar_resposta(pergunta, resposta_usuario, resposta_correta, texto):
+    """Avalia a resposta com Gemma e extrai o trecho do livro"""
+    prompt = f"""
+    Você é um corretor de quizzes. Avalie a seguinte resposta e diga se está certa ou errada,
+    e cite o trecho mais relevante do texto original que a justifique.
+
+    Pergunta: {pergunta}
+    Resposta do aluno: {resposta_usuario}
+    Resposta correta: {resposta_correta}
+
+    Texto de referência:
+    {texto[:3000]}
+
+    Responda em JSON:
+    {{
+      "correto": true/false,
+      "comentario": "...",
+      "trecho_justificativo": "..."
+    }}
+    """
+    r = client.chat.completions.create(
+        model=MODELO_AVALIACAO,
+        messages=[{"role": "user", "content": prompt}]
+    )
     try:
-        for q in questoes:
-            data = {
-                "nome": nome_quiz,
-                "disciplina": disciplina,
-                "questoes": json.dumps(q, ensure_ascii=False),
-            }
-            supabase.table("quizzes").insert(data).execute()
-        st.success(f"Questões do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
-    except Exception as e:
-        st.error(f"Erro ao salvar questões: {e}")
+        return json.loads(r.choices[0].message.content)
+    except:
+        return {"correto": False, "comentario": "Erro ao processar IA.", "trecho_justificativo": ""}
+
+
+def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
+    """Salva o quiz no Supabase"""
+    data = {"nome": nome_quiz, "disciplina": disciplina, "questoes": json.dumps(questoes, ensure_ascii=False)}
+    supabase.table("quizzes").insert(data).execute()
+
+
+def salvar_erro(pergunta, resposta_usuario, resposta_correta, justificativa):
+    """Armazena erros para revisão posterior"""
+    try:
+        data = {
+            "pergunta": pergunta,
+            "resposta_usuario": resposta_usuario,
+            "resposta_correta": resposta_correta,
+            "justificativa": justificativa,
+        }
+        supabase.table("erros").insert(data).execute()
+    except Exception:
+        pass
+
 
 def listar_disciplinas():
-    try:
-        data = supabase.table("quizzes").select("disciplina").execute().data
-        if data:
-            return sorted(list(set([d["disciplina"] for d in data if d["disciplina"]])))
-        return []
-    except Exception as e:
-        st.error(f"Erro ao listar disciplinas: {e}")
-        return []
+    data = supabase.table("quizzes").select("disciplina").execute().data
+    return sorted(list(set([d["disciplina"] for d in data if d["disciplina"]])))
+
 
 def listar_questoes_por_disciplina(disciplina):
-    try:
-        return supabase.table("quizzes").select("*").eq("disciplina", disciplina).execute().data
-    except Exception as e:
-        st.error(f"Erro ao buscar questões: {e}")
-        return []
+    registros = supabase.table("quizzes").select("*").eq("disciplina", disciplina).execute().data
+    questoes = []
+    for r in registros:
+        try:
+            qlist = json.loads(r["questoes"])
+            questoes.extend(qlist if isinstance(qlist, list) else [qlist])
+        except:
+            pass
+    return questoes
+
 
 # ==========================================================
-# INTERFACE INICIAL
+# INTERFACE
 # ==========================================================
-st.title("QuizIA Pro+")
-st.markdown("Plataforma de geracao inteligente de quizzes com IA")
+st.title("🤖 QuizIA Pro+")
+st.markdown("**Plataforma de geração e avaliação automática de quizzes com IA**")
 
-if "show_upload" not in st.session_state:
-    st.session_state.show_upload = False
 
-if st.button("Fazer upload de PDF para gerar quiz"):
-    st.session_state.show_upload = not st.session_state.show_upload
-
-if st.session_state.show_upload:
-    uploaded_file = st.file_uploader("Selecione um arquivo PDF", type=["pdf"])
-    if uploaded_file:
-        st.success("Arquivo carregado com sucesso! Vá até o menu lateral para configurar e gerar suas questoes.")
-
-# ==========================================================
-# MENU LATERAL
-# ==========================================================
-st.sidebar.title("Navegacao")
 menu = st.sidebar.radio(
-    "Escolha uma opcao:",
-    ["Disciplinas", "Flashcards", "Revisao de Erros", "Configurar Estilos", "Configurar Dificuldade"]
+    "📚 Navegação",
+    ["Gerar Quiz", "Responder Quiz", "Revisão de Erros", "Configurar Estilos", "Configurar Dificuldade"]
 )
 
 # ----------------------------------------------------------
-# 1ï¸âƒ£ MENU DISCIPLINAS
+# GERAR QUIZ
 # ----------------------------------------------------------
-if menu == "Disciplinas":
+if menu == "Gerar Quiz":
+    st.header("📄 Gerar Quiz com IA")
+    pdf = st.file_uploader("Selecione um PDF", type=["pdf"])
+    nome_quiz = st.text_input("📝 Nome do Quiz")
+    disciplina = st.text_input("📘 Disciplina")
+
+    if pdf and nome_quiz and disciplina and st.button("🚀 Gerar Questões"):
+        reader = PdfReader(pdf)
+        texto = "\n".join([p.extract_text() for p in reader.pages if p.extract_text()])
+        questoes = gerar_questoes(texto, disciplina)
+        salvar_questoes_no_supabase(nome_quiz, disciplina, questoes)
+        st.success(f"{len(questoes)} questões geradas com sucesso!")
+
+# ----------------------------------------------------------
+# RESPONDER QUIZ
+# ----------------------------------------------------------
+elif menu == "Responder Quiz":
+    st.header("🧠 Responder Quiz")
     disciplinas = listar_disciplinas()
     if not disciplinas:
-        st.info("Nenhuma disciplina cadastrada ainda. Gere um quiz primeiro!")
+        st.info("Nenhuma disciplina disponível ainda.")
     else:
-        disciplina = st.selectbox("Selecione uma disciplina:", disciplinas)
+        disciplina = st.selectbox("Escolha uma disciplina:", disciplinas)
         questoes = listar_questoes_por_disciplina(disciplina)
-        if questoes:
+        if not questoes:
+            st.warning("Nenhuma questão cadastrada para esta disciplina.")
+        else:
+            pdf_texto = ""
+            respostas_usuario = {}
             for q in questoes:
-                with st.container(border=True):
-                    st.markdown(f"**Pergunta:** {q['pergunta']}")
-                    if q.get("opcoes"):
-                        opcoes = json.loads(q["opcoes"])
-                        st.write("**Opcoes:**", ", ".join(opcoes))
-                    st.write(f"**Resposta Correta:** {q['resposta_correta']}")
-                    st.write(f"**Justificativa:** {q['justificativa']}")
-                    st.caption(f"**Dificuldade:** {q['dificuldade']}")
+                st.subheader(q["pergunta"])
+                resposta = st.radio("Escolha sua resposta:", q["opcoes"], key=q["pergunta"])
+                respostas_usuario[q["pergunta"]] = resposta
+
+            if st.button("Verificar Respostas"):
+                with st.spinner("Avaliando suas respostas..."):
+                    for q in questoes:
+                        resultado = avaliar_resposta(
+                            q["pergunta"],
+                            respostas_usuario[q["pergunta"]],
+                            q["resposta_correta"],
+                            q["justificativa"],
+                        )
+                        if resultado["correto"]:
+                            st.success(f"✅ {q['pergunta']}")
+                        else:
+                            st.error(f"❌ {q['pergunta']}")
+                            st.write(f"💬 **Comentário:** {resultado['comentario']}")
+                            st.caption(f"📘 Trecho do texto: {resultado['trecho_justificativo']}")
+                            salvar_erro(q["pergunta"], respostas_usuario[q["pergunta"]], q["resposta_correta"], resultado["comentario"])
 
 # ----------------------------------------------------------
-# 2ï¸âƒ£ MENU CONFIGURAR ESTILOS
+# REVISÃO DE ERROS
 # ----------------------------------------------------------
-elif menu == "Configurar Estilos":
-    st.header("Estilos de Questoes")
-    estilos = st.multiselect(
-        "Selecione os estilos de questoes que deseja permitir:",
-        ["Multipla Escolha", "Aberta", "Preencher Lacuna", "Associar Colunas", "Verdadeiro ou Falso"],
-        default=["Multipla Escolha", "Aberta"]
-    )
-    st.session_state.estilos_selecionados = estilos
-    st.success("Estilos atualizados com sucesso!")
-
-# ----------------------------------------------------------
-# 3ï¸âƒ£ MENU CONFIGURAR DIFICULDADE
-# ----------------------------------------------------------
-elif menu == "Configurar Dificuldade":
-    st.header("Niveis de Dificuldade")
-    dificuldade = st.selectbox("Escolha o nivel de dificuldade:", ["Aleatorio", "Facil", "Medio", "Dificil"])
-    st.session_state.dificuldade = dificuldade
-    st.success("Nivel de dificuldade configurado!")
-
-# ----------------------------------------------------------
-# 4ï¸âƒ£ MENU FLASHCARDS
-# ----------------------------------------------------------
-elif menu == "Flashcards":
-    st.header("Flashcards")
-    st.info("Funcionalidade em desenvolvimento.")
-
-# ----------------------------------------------------------
-# 5ï¸âƒ£ MENU REVISÃƒO DE ERROS
-# ----------------------------------------------------------
-elif menu == "Revisao de Erros":
-    st.header("Revisao de Erros")
-    erros = supabase.table("erros").select("*").order("created_at", desc=True).execute().data
-    if not erros:
-        st.info("Nenhum erro registrado ainda.")
-    else:
-        for erro in erros:
-            with st.container(border=True):
-                st.write(f"**Pergunta:** {erro['pergunta']}")
-                st.write(f"**Sua Resposta:** {erro['resposta_usuario']}")
-                st.write(f"**Correta:** {erro['resposta_correta']}")
-                st.caption(erro.get("justificativa", ""))
+elif menu == "Revisão de Erros":
+    st.header("📋 Revisão de Erros")
+    try:
+        erros = supabase.table("erros").select("*").order("created_at", desc=True).execute().data
+        if not erros:
+            st.info("Nenhum erro registrado ainda.")
+        else:
+            for e in erros:
+                with st.expander(e["pergunta"]):
+                    st.write(f"**Sua resposta:** {e['resposta_usuario']}")
+                    st.write(f"**Correta:** {e['resposta_correta']}")
+                    st.caption(e["justificativa"])
+    except Exception:
+        st.warning("Tabela 'erros' ainda não configurada.")
