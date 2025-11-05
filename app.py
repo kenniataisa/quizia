@@ -114,7 +114,7 @@ if menu == "Disciplinas":
                         or "Pergunta não disponível"
                     )
 
-                    st.markdown(f"**{i+1}. {pergunta}**")
+                    st.markdown(f"**{i+1}. {questoes}**")
 
                     try:
                         opcoes = json.loads(q.get("opcoes", "[]"))
