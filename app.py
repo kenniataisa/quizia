@@ -5,6 +5,7 @@ from supabase import create_client, Client
 from openai import OpenAI
 import time
 import uuid
+import re  # Importando regex para limpeza de JSON
 
 # -------------------------------
 # 🔑 Configurações
@@ -89,10 +90,16 @@ def gerar_questoes_deepseek(texto):
         )
         content = response.choices[0].message.content
         
-        # Tenta limpar o JSON (às vezes a IA adiciona markdown)
-        if content.strip().startswith("```json"):
-            content = content.strip().lstrip("```json").rstrip("```")
-            
+        # Limpeza robusta de JSON
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+        if match:
+            content = match.group(0)
+        else:
+            # Se não achar uma lista, tenta achar um objeto (menos provável)
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                content = match.group(0)
+
         return json.loads(content)
     except json.JSONDecodeError:
         st.warning(f"Não foi possível decodificar a resposta da IA (DeepSeek). Tentando novamente...")
@@ -122,13 +129,22 @@ def refinar_questoes_llama(questoes):
         )
         content = response.choices[0].message.content
 
-        if content.strip().startswith("```json"):
-            content = content.strip().lstrip("```json").rstrip("```")
+        # --- NOVA LIMPEZA ROBUSTA ---
+        match = re.search(r'\[.*\]', content, re.DOTALL)
+        if match:
+            json_text = match.group(0)
+        else:
+            match = re.search(r'\{.*\}', content, re.DOTALL)
+            if match:
+                json_text = match.group(0)
+            else:
+                json_text = content
 
-        return json.loads(content)
+        return json.loads(json_text)
+    
     except json.JSONDecodeError:
         st.warning("Não foi possível decodificar a resposta do Llama. Usando as questões originais.")
-        return questoes # Retorna original em caso de erro de refino
+        return questoes 
     except Exception as e:
         st.error(f"Erro na API Llama: {e}")
         return questoes
@@ -153,13 +169,12 @@ def salvar_quiz(disciplina, nome, questoes):
 # -------------------------------
 # 🎯 Função reutilizável: Responder Quiz
 # -------------------------------
-def render_quiz_taker(questoes, is_temp=False):
+def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
     """
     Renderiza a interface para responder um quiz.
-    'is_temp' é True se o quiz não foi salvo (veio do "Responder Agora").
+    'disciplina_nome' é usado para taguear erros.
     """
     
-    # Garante que 'questoes' é uma lista de dicionários
     if isinstance(questoes, str):
         try:
             questoes_list = json.loads(questoes)
@@ -185,7 +200,6 @@ def render_quiz_taker(questoes, is_temp=False):
 
         st.write(f"**{i+1}. {q['pergunta']}**")
         
-        # Garante que as opções são uma lista
         opcoes = q.get("opcoes", [])
         if not isinstance(opcoes, list) or not opcoes:
              st.write("Esta questão não tem opções.")
@@ -194,9 +208,7 @@ def render_quiz_taker(questoes, is_temp=False):
         resposta = st.radio("Escolha uma opção:", opcoes, key=f"q{i}")
         
         if st.button(f"Verificar {i+1}", key=f"b{i}"):
-            correta_prefix = q.get("resposta_correta", "Z") # "A", "B", etc.
-            
-            # Encontra o texto completo da resposta correta
+            correta_prefix = q.get("resposta_correta", "Z")
             correta_full = next((opt for opt in opcoes if opt.strip().startswith(correta_prefix)), "N/A")
 
             if resposta.strip().startswith(correta_prefix):
@@ -206,22 +218,29 @@ def render_quiz_taker(questoes, is_temp=False):
                 if q.get("justificativa"):
                     st.info(f"**Justificativa:** {q['justificativa']}")
                 
-                # Log de erros para a aba "Revisão de erros"
+                # Log de erros com tagueamento de disciplina
                 error_entry = {
                     "pergunta": q["pergunta"],
                     "sua_resposta": resposta,
                     "resposta_correta": correta_full,
-                    "justificativa": q.get("justificativa", "N/A")
+                    "justificativa": q.get("justificativa", "N/A"),
+                    "disciplina": disciplina_nome if disciplina_nome else "Avulso"
                 }
                 if error_entry not in st.session_state.error_log:
                     st.session_state.error_log.append(error_entry)
         
         st.divider()
 
+    # Botão de voltar só aparece em quizzes temporários ou quizzes abertos
     if is_temp:
         if st.button("Voltar para Home"):
             st.session_state.quiz_to_take = None
             st.rerun()
+    elif "selected_quiz_id" in st.session_state and st.session_state.selected_quiz_id:
+         if st.button("Voltar para lista de quizzes"):
+            st.session_state.selected_quiz_id = None
+            st.rerun()
+
 
 # -------------------------------
 # 🏠 Página Home (Geração)
@@ -256,8 +275,7 @@ def render_home_page():
                         st.session_state.generated_questions = None
                         st.session_state.show_save_form = False
                         st.rerun()
-                    # Se salvar falhar, o 'salvar_quiz' já mostra o erro
-        
+                    
         if st.button("Cancelar"):
             st.session_state.show_save_form = False
             st.rerun()
@@ -274,11 +292,16 @@ def render_home_page():
             st.rerun()
         if col2.button("🎯 Responder Agora (Sem Salvar)", use_container_width=True):
             st.session_state.quiz_to_take = st.session_state.generated_questions
-            st.session_state.generated_questions = None # Limpa para o próximo
+            st.session_state.generated_questions = None 
             st.rerun()
 
     # Estado 1: Mostrar opções de entrada (Upload/Texto)
     else:
+        # --- NOVO: Guia para usuários ---
+        st.info("Procurando seus quizzes salvos? 📚 Acesse a aba **Disciplinas** no menu à esquerda.")
+        st.markdown("---")
+        # --- FIM DA MUDANÇA ---
+
         col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("⬆️ Upload do Arquivo", use_container_width=True):
@@ -337,58 +360,108 @@ def render_home_page():
                     st.error("Não foi possível gerar nenhuma questão. Verifique o conteúdo ou tente novamente.")
 
 # -------------------------------
-# 📚 Página Disciplinas (Responder Salvo)
+# 📚 Página Disciplinas
 # -------------------------------
 def render_disciplinas_page():
     st.header("📚 Minhas Disciplinas e Quizzes")
 
+    # --- LÓGICA DE NAVEGAÇÃO: Se um quiz for selecionado, mostre-o
+    if st.session_state.selected_quiz_id:
+        try:
+            quiz_data = supabase.table("quizzes").select("nome, questoes, disciplina").eq("id", st.session_state.selected_quiz_id).single().execute()
+            
+            if quiz_data.data:
+                st.subheader(f"Respondendo: {quiz_data.data['nome']}")
+                st.caption(f"Disciplina: {quiz_data.data['disciplina']}")
+                st.divider()
+                render_quiz_taker(
+                    quiz_data.data["questoes"], 
+                    disciplina_nome=quiz_data.data["disciplina"], 
+                    is_temp=False
+                )
+            else:
+                st.error("Não foi possível carregar o quiz selecionado.")
+                st.session_state.selected_quiz_id = None # Limpa ID inválido
+
+        except Exception as e:
+            st.error(f"Erro ao buscar quiz: {e}")
+            st.session_state.selected_quiz_id = None
+        return # Para a execução aqui para mostrar apenas o quiz
+
+    # --- LÓGICA DE NAVEGAÇÃO: Se uma disciplina for selecionada, mostre os detalhes
+    if st.session_state.selected_disciplina:
+        if st.button("← Voltar para todas as disciplinas"):
+            st.session_state.selected_disciplina = None
+            st.rerun()
+        
+        st.header(f"Disciplina: {st.session_state.selected_disciplina}")
+
+        # Abas internas da disciplina
+        tab_quiz, tab_flash, tab_erros = st.tabs(["🎓 Quizzes", "🗂️ Flashcards", "❌ Revisão de Erros"])
+
+        with tab_quiz:
+            st.subheader(f"Quizzes de {st.session_state.selected_disciplina}")
+            try:
+                # Busca quizzes APENAS para esta disciplina
+                quizzes_disc = supabase.table("quizzes").select("id, nome").eq("disciplina", st.session_state.selected_disciplina).execute()
+                
+                if not quizzes_disc.data:
+                    st.info("Nenhum quiz encontrado para esta disciplina.")
+                else:
+                    for quiz in quizzes_disc.data:
+                        if st.button(quiz["nome"], key=f"quiz_{quiz['id']}", use_container_width=True):
+                            st.session_state.selected_quiz_id = quiz["id"]
+                            st.rerun() # Recarrega a página para mostrar o quiz taker
+
+            except Exception as e:
+                st.error(f"Erro ao buscar quizzes da disciplina: {e}")
+
+        with tab_flash:
+            st.info("Flashcards (Em construção... 🏗️)")
+            st.write("Aqui ficarão os flashcards gerados para esta disciplina.")
+
+        with tab_erros:
+            st.info("Revisão de Erros (Em construção... 🏗️)")
+            st.write("Aqui ficará a revisão de erros específica para esta disciplina.")
+            # Lógica futura: Filtrar st.session_state.error_log
+            erros_disciplina = [e for e in st.session_state.error_log if e["disciplina"] == st.session_state.selected_disciplina]
+            if not erros_disciplina:
+                st.write("Nenhum erro registrado para esta disciplina ainda.")
+            else:
+                st.write(f"{len(erros_disciplina)} erros para revisar.")
+                # (A revisão completa ainda está na aba principal "Revisão de Erros")
+
+
+        return # Para a execução aqui
+
+    # --- LÓGICA DE NAVEGAÇÃO: Nenhuma disciplina selecionada, mostrar os CARDS
     try:
         quizzes = supabase.table("quizzes").select("id, nome, disciplina").execute()
         
         if not quizzes.data:
-            st.warning("Nenhum quiz salvo encontrado.")
+            st.warning("Nenhum quiz salvo encontrado. Crie um na página Home!")
             return
 
-        # Agrupa por disciplina
         disciplinas = {}
         for q in quizzes.data:
             disc = q["disciplina"]
             if disc not in disciplinas:
                 disciplinas[disc] = []
-            disciplinas[disc].append({"id": q["id"], "nome": q["nome"]})
+            disciplinas[disc].append(q)
 
-        # Cria abas para cada disciplina
-        tabs = st.tabs(disciplinas.keys())
-        
-        for i, tab in enumerate(tabs):
-            disciplina_nome = list(disciplinas.keys())[i]
-            with tab:
-                st.subheader(f"Quizzes de {disciplina_nome}")
-                for quiz in disciplinas[disciplina_nome]:
-                    if st.button(quiz["nome"], key=f"quiz_{quiz['id']}"):
-                        st.session_state.selected_quiz_id = quiz["id"]
-        
-        # Se um quiz foi selecionado, busca e mostra
-        if "selected_quiz_id" in st.session_state:
-            quiz_id = st.session_state.selected_quiz_id
-            st.divider()
-            st.subheader(f"Respondendo Quiz")
-
-            if st.button("Voltar para lista"):
-                del st.session_state.selected_quiz_id
-                st.rerun()
-
-            # Busca o quiz completo
-            quiz_data = supabase.table("quizzes").select("nome, questoes").eq("id", quiz_id).single().execute()
-            
-            if quiz_data.data:
-                st.markdown(f"**Quiz:** {quiz_data.data['nome']}")
-                render_quiz_taker(quiz_data.data["questoes"], is_temp=False)
-            else:
-                st.error("Não foi possível carregar o quiz selecionado.")
+        # Renderiza os CARDS de disciplina
+        for disc_nome, quizzes_list in disciplinas.items():
+            with st.container(border=True):
+                st.subheader(disc_nome)
+                st.write(f"{len(quizzes_list)} quizzes salvos.")
+                if st.button("Abrir Disciplina", key=f"open_{disc_nome}"):
+                    st.session_state.selected_disciplina = disc_nome
+                    st.rerun()
+            st.markdown("---") # Espaçador
 
     except Exception as e:
         st.error(f"Erro ao buscar quizzes: {e}")
+
 
 # -------------------------------
 # ❌ Página Revisão de Erros
@@ -404,10 +477,23 @@ def render_revisao_page():
         st.session_state.error_log = []
         st.rerun()
 
+    # --- Lógica de Filtro ---
+    disciplinas_com_erro = sorted(list(set(e["disciplina"] for e in st.session_state.error_log)))
+    filtro_disciplina = st.selectbox("Filtrar por Disciplina:", ["Todas"] + disciplinas_com_erro)
+
     st.subheader("Questões que você errou:")
     
-    for i, erro in enumerate(st.session_state.error_log):
+    erros_filtrados = st.session_state.error_log
+    if filtro_disciplina != "Todas":
+        erros_filtrados = [e for e in st.session_state.error_log if e["disciplina"] == filtro_disciplina]
+
+    if not erros_filtrados:
+        st.info("Nenhum erro encontrado para esta disciplina.")
+        return
+
+    for i, erro in enumerate(erros_filtrados):
         with st.container(border=True):
+            st.caption(f"Disciplina: {erro['disciplina']}")
             st.markdown(f"**{i+1}. {erro['pergunta']}**")
             st.error(f"Sua resposta: {erro['sua_resposta']}")
             st.success(f"Resposta correta: {erro['resposta_correta']}")
@@ -453,6 +539,8 @@ if "error_log" not in st.session_state:
     st.session_state.error_log = []
 if "selected_quiz_id" not in st.session_state:
     st.session_state.selected_quiz_id = None
+if "selected_disciplina" not in st.session_state:
+    st.session_state.selected_disciplina = None
 
 
 # -------------------------------
@@ -462,18 +550,19 @@ with st.sidebar:
     st.title("Menu QuizIA")
     
     if st.button("🏠 Home", use_container_width=True):
-        # Reseta o estado da Home ao clicar
         st.session_state.page = "Home"
         st.session_state.input_method = None
         st.session_state.generated_questions = None
         st.session_state.show_save_form = False
         st.session_state.quiz_to_take = None
         st.session_state.selected_quiz_id = None
+        st.session_state.selected_disciplina = None # Reset
         st.rerun()
 
     if st.button("📚 Disciplinas", use_container_width=True):
         st.session_state.page = "Disciplinas"
-        st.session_state.selected_quiz_id = None # Reseta quiz selecionado
+        st.session_state.selected_quiz_id = None 
+        st.session_state.selected_disciplina = None # Reset
         st.rerun()
 
     if st.button("❌ Revisão de erros", use_container_width=True):
