@@ -45,36 +45,22 @@ client = openai.OpenAI(
 MODELO_GERACAO = "tngtech/deepseek-r1t2-chimera:free"
 MODELO_AVALIACAO = "google/gemma-3-27b-it:free"
 
-# ==========================================================
-# FUNÃ‡Ã•ES SUPABASE (CONFIGURAÃ‡ÃƒO DO BANCO)
-# ==========================================================
-# Tabelas necessÃ¡rias no Supabase:
-# 1ï¸âƒ£ questoes -> id, nome_quiz, disciplina, estilo, pergunta, opcoes, resposta_correta, justificativa, contexto_citado, dificuldade
-# 2ï¸âƒ£ erros -> id, pergunta, resposta_correta, resposta_usuario, estilo, justificativa, contexto_citado, created_at
-# ==========================================================
-
 def salvar_questoes_no_supabase(nome_quiz, disciplina, questoes):
     try:
         for q in questoes:
             data = {
-                "nome_quiz": nome_quiz,
+                "nome": nome_quiz,
                 "disciplina": disciplina,
-                "estilo": q.get("estilo"),
-                "pergunta": q.get("pergunta") or q.get("texto_base") or q.get("pergunta_guia"),
-                "opcoes": json.dumps(q.get("opcoes", []), ensure_ascii=False),
-                "resposta_correta": q.get("resposta_correta") or ", ".join(q.get("respostas_aceitaveis", [])),
-                "justificativa": q.get("justificativa", ""),
-                "contexto_citado": q.get("contexto_citado", ""),
-                "dificuldade": q.get("dificuldade", "Desconhecida")
+                "questoes": json.dumps(q, ensure_ascii=False),
             }
-            supabase.table("questoes").insert(data).execute()
-        st.success(f"Questoes do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
+            supabase.table("quizzes").insert(data).execute()
+        st.success(f"Questões do quiz '{nome_quiz}' salvas na disciplina '{disciplina}' com sucesso!")
     except Exception as e:
-        st.error(f"Erro ao salvar questoes: {e}")
+        st.error(f"Erro ao salvar questões: {e}")
 
 def listar_disciplinas():
     try:
-        data = supabase.table("questoes").select("disciplina").execute().data
+        data = supabase.table("quizzes").select("disciplina").execute().data
         if data:
             return sorted(list(set([d["disciplina"] for d in data if d["disciplina"]])))
         return []
@@ -84,9 +70,9 @@ def listar_disciplinas():
 
 def listar_questoes_por_disciplina(disciplina):
     try:
-        return supabase.table("questoes").select("*").eq("disciplina", disciplina).execute().data
+        return supabase.table("quizzes").select("*").eq("disciplina", disciplina).execute().data
     except Exception as e:
-        st.error(f"Erro ao buscar questÃµes: {e}")
+        st.error(f"Erro ao buscar questões: {e}")
         return []
 
 # ==========================================================
