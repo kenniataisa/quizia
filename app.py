@@ -194,7 +194,7 @@ def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
 
     st.subheader("Responda as questões:")
     for i, q in enumerate(questoes_list):
-        if not isinstance(q, dict) or "pergunta" not in q or "opcoes" not not in q:
+        if not isinstance(q, dict) or "pergunta" not in q or "opcoes" not in q:
             st.warning(f"Ignorando questão {i+1} (formato inválido)."); continue
 
         st.write(f"**{i+1}. {q['pergunta']}**")
