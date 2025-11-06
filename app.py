@@ -194,7 +194,7 @@ def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
 
     st.subheader("Responda as questões:")
     for i, q in enumerate(questoes_list):
-        if not isinstance(q, dict) or "pergunta" not in q or "opcoes" not in q:
+        if not isinstance(q, dict) or "pergunta" not in q or "opcoes" not not in q:
             st.warning(f"Ignorando questão {i+1} (formato inválido)."); continue
 
         st.write(f"**{i+1}. {q['pergunta']}**")
@@ -233,14 +233,13 @@ def render_quiz_taker(questoes, disciplina_nome=None, is_temp=False):
 
 def render_flashcard_viewer(deck_data):
     """
-    NOVA IMPLEMENTAÇÃO: Renderiza o visualizador com Spaced Repetition.
+    Renderiza o visualizador com Spaced Repetition.
     """
     st.subheader(f"Revisando: {deck_data['nome']}")
     st.caption(f"Disciplina: {deck_data['disciplina']}")
     st.divider()
 
     # --- Lógica de Carregamento do Baralho ---
-    # Se o baralho de revisão ainda não foi criado, crie-o.
     if not st.session_state.deck_to_review and not st.session_state.deck_completed:
         try:
             if isinstance(deck_data['cards'], str):
@@ -303,7 +302,6 @@ def render_flashcard_viewer(deck_data):
             col1, col2, col3 = st.columns(3)
             with col1:
                 if st.button("🟥 Errei", use_container_width=True):
-                    # Pega o card, remove e insere no meio
                     card = st.session_state.deck_to_review.pop(0)
                     meio = len(st.session_state.deck_to_review) // 2
                     st.session_state.deck_to_review.insert(meio, card)
@@ -311,14 +309,12 @@ def render_flashcard_viewer(deck_data):
                     st.rerun()
             with col2:
                 if st.button("🟨 Acertei Parcialmente", use_container_width=True):
-                    # Pega o card, remove e bota no fim
                     card = st.session_state.deck_to_review.pop(0)
                     st.session_state.deck_to_review.append(card)
                     st.session_state.flashcard_flipped = False
                     st.rerun()
             with col3:
                 if st.button("🟩 Acertei", use_container_width=True):
-                    # Pega o card, remove da revisão e bota nos completos
                     card = st.session_state.deck_to_review.pop(0)
                     st.session_state.deck_completed.append(card)
                     st.session_state.flashcard_flipped = False
@@ -422,7 +418,6 @@ def render_home_page():
                 progress_bar = st.progress(0, text="Processando partes do texto...")
                 for i, chunk in enumerate(chunks):
                     st.info(f"🔹 Processando (Quiz) parte {i+1}/{len(chunks)}...")
-                    # Pega as configs da sessão!
                     q = gerar_questoes_deepseek(chunk, st.session_state.config_dificuldade, st.session_state.config_estilo)
                     if q: q_refinado = refinar_questoes_llama(q); questoes_final.extend(q_refinado)
                     progress_bar.progress((i + 1) / len(chunks), text=f"Parte {i+1}/{len(chunks)} processada")
@@ -440,7 +435,6 @@ def render_home_page():
                 progress_bar = st.progress(0, text="Processando partes do texto...")
                 for i, chunk in enumerate(chunks):
                     st.info(f"🔹 Processando (Cards) parte {i+1}/{len(chunks)}...")
-                    # Pega as configs da sessão (usando 'dificuldade' para flashcards)
                     cards = gerar_flashcards_ia(chunk, st.session_state.config_dificuldade)
                     if cards: cards_final.extend(cards)
                     progress_bar.progress((i + 1) / len(chunks), text=f"Parte {i+1}/{len(chunks)} processada")
@@ -455,18 +449,19 @@ def render_home_page():
 def render_disciplinas_page():
     st.header("📚 Minhas Disciplinas")
 
-    # --- Modal de Confirmação de Exclusão (NOVO) ---
+    # --- (MUDANÇA) Caixa de Confirmação de Exclusão (Substitui st.modal) ---
     if st.session_state.confirm_delete_id:
         item_id = st.session_state.confirm_delete_id
         item_tipo = st.session_state.confirm_delete_type
         item_nome = st.session_state.confirm_delete_name
         
-        with st.modal("Confirmar Exclusão", key="delete_modal"):
+        st.error(f"**ALERTA DE EXCLUSÃO**")
+        with st.container(border=True):
             st.warning(f"Você tem certeza que quer deletar o {item_tipo} **'{item_nome}'**?")
             st.write("Esta ação é permanente.")
             
             col1, col2 = st.columns(2)
-            if col1.button("Confirmar", use_container_width=True, type="primary"):
+            if col1.button("Confirmar Exclusão", use_container_width=True, type="primary"):
                 if deletar_item_supabase(item_id, item_tipo):
                     st.session_state.confirm_delete_id = None
                     st.session_state.confirm_delete_type = None
@@ -477,6 +472,10 @@ def render_disciplinas_page():
                 st.session_state.confirm_delete_type = None
                 st.session_state.confirm_delete_name = None
                 st.rerun()
+        st.divider()
+        # Para a execução para não mostrar o resto da página enquanto confirma
+        return 
+    # --- Fim da mudança ---
 
     # --- Lógica de Navegação 1: Mostrar Visualizador de Flashcard
     if st.session_state.selected_deck_id:
@@ -621,21 +620,22 @@ def render_revisao_page():
         st.divider()
 
 # -------------------------------
-# ⚙️ Página Configurar (NOVA IMPLEMENTAÇÃO)
+# ⚙️ Página Configurar (IMPLEMENTADA)
 # -------------------------------
 def render_configurar_page():
     st.header("⚙️ Configurar Geração de IA")
     st.write("Ajuste as preferências para a geração de novos quizzes e flashcards.")
     st.divider()
 
-    st.subheader("Configurações de Quiz")
+    st.subheader("Configurações de Geração")
     
     # Dificuldade (usada por ambos)
     st.session_state.config_dificuldade = st.radio(
         "Nível de Dificuldade:",
         ["Padrão (Recomendado)", "Fácil (Foco em Conceitos)", "Difícil (Análise Crítica)"],
         key="config_dificuldade_widget",
-        horizontal=True
+        horizontal=True,
+        index=["Padrão (Recomendado)", "Fácil (Foco em Conceitos)", "Difícil (Análise Crítica)"].index(st.session_state.config_dificuldade)
     )
 
     # Estilo de Questão (só para quiz)
@@ -643,11 +643,12 @@ def render_configurar_page():
         "Estilo de Questão (para Quizzes):",
         ["Múltipla Escolha (Padrão)", "Verdadeiro/Falso", "Resposta Curta (beta)"],
         key="config_estilo_widget",
-        horizontal=True
+        horizontal=True,
+        index=["Múltipla Escolha (Padrão)", "Verdadeiro/Falso", "Resposta Curta (beta)"].index(st.session_state.config_estilo)
     )
     
     st.divider()
-    st.info("Suas preferências são salvas automaticamente nesta sessão.")
+    st.info("Suas preferências são salvas automaticamente nesta sessão e usadas na página 'Home'.")
 
 # -------------------------------
 # 🧩 Interface Principal Streamlit
@@ -684,31 +685,29 @@ if "confirm_delete_type" not in st.session_state: st.session_state.confirm_delet
 if "confirm_delete_name" not in st.session_state: st.session_state.confirm_delete_name = None
 
 # Widgets (para reter o estado do selectbox/radio)
-if "config_dificuldade_widget" not in st.session_state: st.session_state.config_dificuldade_widget = "Padrão (Recomendado)"
-if "config_estilo_widget" not in st.session_state: st.session_state.config_estilo_widget = "Múltipla Escolha (Padrão)"
-
+if "config_dificuldade_widget" not in st.session_state: st.session_state.config_dificuldade_widget = st.session_state.config_dificuldade
+if "config_estilo_widget" not in st.session_state: st.session_state.config_estilo_widget = st.session_state.config_estilo
+if "filtro_selectbox" not in st.session_state: st.session_state.filtro_selectbox = st.session_state.filtro_revisao
 
 # -------------------------------
 # 🧭 Navegação Sidebar
 # -------------------------------
 def reset_page_states():
-    # Reseta estados que controlam a NAVEGAÇÃO
     st.session_state.selected_quiz_id = None
     st.session_state.selected_disciplina = None
     st.session_state.selected_deck_id = None
     st.session_state.filtro_revisao = "Todas"
-    
-    # Reseta estados da HOME
     st.session_state.generated_quiz = None
     st.session_state.generated_flashcards = None
     st.session_state.show_save_form = None
     st.session_state.quiz_to_take = None
-    
-    # Reseta estados do FLASHCARD VIEWER
     st.session_state.deck_master_list = []
     st.session_state.deck_to_review = []
     st.session_state.deck_completed = []
     st.session_state.flashcard_flipped = False
+    st.session_state.confirm_delete_id = None # Reseta a confirmação de delete
+    st.session_state.confirm_delete_type = None
+    st.session_state.confirm_delete_name = None
 
 with st.sidebar:
     st.title("Menu QuizIA")
@@ -725,7 +724,7 @@ with st.sidebar:
 
     if st.button("❌ Revisão de erros", use_container_width=True):
         st.session_state.page = "Revisão de erros"
-        st.session_state.filtro_revisao = "Todas"
+        st.session_state.filtro_revisao = "Todas" # Reseta só o filtro
         st.rerun()
 
     if st.button("⚙️ Configurar", use_container_width=True):
