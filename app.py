@@ -44,7 +44,7 @@ OPENROUTER_HEADERS = {
 }
 
 # -------------------------------
-# 📚 Funções de Extração e Chunk
+# 📚 Funções de Extração e Chunk (AJUSTADO PARA SER MAIS ROBUSTO)
 # -------------------------------
 def extract_text_from_pdf(uploaded_file):
     try:
@@ -58,17 +58,38 @@ def extract_text_from_pdf(uploaded_file):
         return ""
 
 def chunk_text(text, max_chars=3000):
+    """Divide o texto em chunks, priorizando quebras de parágrafo, mas forçando
+       a quebra se exceder o max_chars, garantindo que mesmo texto denso seja processado."""
     paragraphs = text.split("\n")
     chunks = []
     current_chunk = ""
+    
     for para in paragraphs:
-        if len(current_chunk) + len(para) < max_chars:
-            current_chunk += para + "\n"
+        para_com_espaco = para + "\n"
+        
+        # Se adicionar o parágrafo atual ultrapassar o limite
+        if len(current_chunk) + len(para_com_espaco) > max_chars:
+            
+            # 1. Salva o chunk atual se ele não estiver vazio
+            if current_chunk:
+                chunks.append(current_chunk.strip())
+            
+            # 2. Se o parágrafo for ENORME (maior que o max_chars), ele precisa ser quebrado
+            if len(para_com_espaco) > max_chars:
+                # Quebra o parágrafo gigante em sub-chunks de max_chars
+                for i in range(0, len(para_com_espaco), max_chars):
+                    chunks.append(para_com_espaco[i:i + max_chars].strip())
+                current_chunk = "" # Inicia o próximo chunk
+            else:
+                # Caso contrário, o parágrafo é o novo chunk inicial
+                current_chunk = para_com_espaco
+        
         else:
-            chunks.append(current_chunk.strip())
-            current_chunk = para + "\n"
+            current_chunk += para_com_espaco
+            
     if current_chunk:
         chunks.append(current_chunk.strip())
+        
     return chunks
 
 # -------------------------------
@@ -130,7 +151,7 @@ FORMATO DE RESPOSTA OBRIGATÓRIO (JSON):
   {{
     "tipo": "multipla_escolha" | "vf" | "aberta" | "lacuna",
     "pergunta": "...",
-    "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."], # usar apenas se tipo for multipla_escolha
+    "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."], 
     "resposta_correta": "...",
     "trecho_referencia": "copie aqui o trecho EXATO do PDF que embasa a resposta"
   }}
@@ -215,7 +236,7 @@ Retorne em JSON:
 
 
 # -------------------------------
-# 💾 Funções do Supabase
+# 💾 Funções do Supabase 
 # -------------------------------
 def salvar_quiz(disciplina, nome, questoes):
     try:
@@ -236,7 +257,7 @@ def deletar_item_supabase(id, tipo):
         st.error(f"Erro ao deletar: {e}"); return False
 
 # -------------------------------
-# 🎯 Funções de Renderização de UI
+# 🎯 Funções de Renderização de UI (Incluindo Quiz Taker)
 # -------------------------------
 
 def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
@@ -256,24 +277,27 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
     if is_temp:
         st.caption("Este é um quiz temporário gerado a partir da página Home. Não será salvo o progresso.")
     
-    # Inicializa o estado para armazenar as respostas do usuário e o status de checagem
-    quiz_id = id(questoes) # ID único para este conjunto de questões
+    quiz_id = id(questoes) # ID único
+    
+    # Inicializa o estado de verificação (mantido fora do loop)
     if f"respostas_{quiz_id}" not in st.session_state:
         st.session_state[f"respostas_{quiz_id}"] = {}
     
     if f"verificado_{quiz_id}" not in st.session_state:
         st.session_state[f"verificado_{quiz_id}"] = False
 
-    # Botão para voltar (se não for temporário)
+    # Botão para voltar
     if not is_temp and st.button("← Voltar para a Disciplina"):
         st.session_state.selected_quiz_id = None
         st.rerun()
 
     st.markdown("---")
 
-    # Inicia o formulário para submeter todas as respostas de uma vez
+    # Inicia o formulário
     with st.form(key=f"quiz_form_{quiz_id}"):
         
+        respostas_coletadas = {} 
+
         for i, q in enumerate(questoes):
             
             pergunta = q.get("pergunta", "Questão sem texto.")
@@ -283,25 +307,21 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
             st.write(pergunta)
             
             # --- Renderização do Widget de Resposta ---
-            resposta_key = f"resp_{quiz_id}_{i}"
+            resposta_key = f"resp_widget_{i}" # Chave do widget local dentro do formulário
             
-            # Garante que o estado de resposta_key exista, evitando KeyError no st.radio
-            if resposta_key not in st.session_state:
-                 st.session_state[resposta_key] = None
-
             if tipo == "multipla_escolha":
                 opcoes = q.get("opcoes", ["A) Opção A", "B) Opção B"])
-                st.session_state[resposta_key] = st.radio(
+                widget_value = st.radio(
                     "Selecione uma opção:",
                     opcoes,
-                    index=None,
+                    index=None, 
                     key=resposta_key,
                     label_visibility="collapsed"
                 )
             
             elif tipo == "vf":
                 opcoes_vf = ["V - Verdadeiro", "F - Falso"]
-                st.session_state[resposta_key] = st.radio(
+                widget_value = st.radio(
                     "Escolha:",
                     opcoes_vf,
                     index=None,
@@ -310,33 +330,29 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
                 )
             
             elif tipo == "aberta" or tipo == "lacuna":
-                # Usamos um text_area para permitir respostas mais longas
-                st.session_state[resposta_key] = st.text_area(
+                widget_value = st.text_area(
                     "Sua resposta:",
                     key=resposta_key,
                     height=80,
                     label_visibility="collapsed"
                 )
             
-            # Salva a resposta atual no dicionário de respostas
-            st.session_state[f"respostas_{quiz_id}"][i] = st.session_state[resposta_key]
+            # Armazena o valor retornado pelo widget na lista temporária
+            respostas_coletadas[i] = widget_value
 
             # Se o quiz já foi verificado, mostramos o feedback em tempo real
             if st.session_state[f"verificado_{quiz_id}"]:
                 
-                resposta_usuario = st.session_state[f"respostas_{quiz_id}"][i]
+                # Usa a resposta salva após a submissão
+                resposta_usuario = st.session_state[f"respostas_{quiz_id}"].get(i, "") 
                 correta = q.get("resposta_correta", "Não definida")
                 
-                # Para Múltipla Escolha, V/F e Lacuna: Checagem direta
+                # Lógica de checagem direta (Múltipla Escolha, V/F, Lacuna)
                 if tipo in ["multipla_escolha", "vf", "lacuna"]:
-                    # Lógica de checagem simplificada (requer chamada à função de checagem idealmente)
                     is_correct = False
-                    if tipo == "multipla_escolha" and resposta_usuario and resposta_usuario.startswith(correta):
-                        is_correct = True
-                    elif tipo == "vf" and resposta_usuario and resposta_usuario[0].upper() == correta.upper():
-                         is_correct = True
-                    elif tipo == "lacuna" and resposta_usuario and resposta_usuario.lower().strip() == correta.lower().strip():
-                         is_correct = True
+                    if tipo == "multipla_escolha" and resposta_usuario and resposta_usuario.startswith(correta): is_correct = True
+                    elif tipo == "vf" and resposta_usuario and resposta_usuario[0].upper() == correta.upper(): is_correct = True
+                    elif tipo == "lacuna" and resposta_usuario and resposta_usuario.lower().strip() == correta.lower().strip(): is_correct = True
 
                     if is_correct:
                         st.success("✅ Correto")
@@ -344,21 +360,13 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
                         st.error(f"❌ Incorreto. A correta é: {correta}")
                         st.info(f"Trecho de Referência: {q.get('trecho_referencia', 'N/A')}")
                 
-                # Para Questões Abertas: Feedback complexo via IA
+                # Feedback para Questões Abertas
                 elif tipo == "aberta":
-                    # Este é o ponto onde você chamaria o avaliar_resposta_aberta.
-                    # Por simplicidade da UI, vamos manter a chamada externa aqui
-                    
-                    # Simulação de chamada: O código final deve ter o botão de submissão fora 
-                    # do loop para não travar a aplicação. Aqui, simulamos o resultado 
-                    # do avaliar_resposta_aberta.
-                    
-                    # Chamada real (assumindo que o avaliar_resposta_aberta foi executado):
-                    # avaliacao = avaliar_resposta_aberta(resposta_usuario, correta, q.get('trecho_referencia'))
-                    
-                    st.info("⚠️ Para feedback completo, clique em 'Finalizar e Verificar'.")
-                    st.success(f"Resposta Correta: {correta}")
-                    
+                    st.info(f"Resposta Correta: {correta}")
+                    # Este é o ponto onde o avaliacao = avaliar_resposta_aberta(...) seria chamado
+                    # E o resultado (similaridade/explicação) seria exibido.
+                    st.warning("O feedback didático da IA para questões abertas é processado após a submissão final.")
+
 
             st.markdown("---")
         
@@ -366,16 +374,16 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
         submitted = st.form_submit_button("Finalizar e Verificar Respostas", type="primary")
 
         if submitted:
-            # MARCAR COMO VERIFICADO E REDESENHAR A PÁGINA
+            # 1. SALVA AS RESPOSTAS COLETADAS NO ESTADO DE SESSÃO
+            st.session_state[f"respostas_{quiz_id}"] = respostas_coletadas
+            
+            # 2. MARCA COMO VERIFICADO
             st.session_state[f"verificado_{quiz_id}"] = True
             
-            # O código para avaliação de questões abertas deve ser feito AQUI, 
-            # antes do rerun, para evitar o loop.
-            
             st.toast("Respostas verificadas! Veja o feedback abaixo de cada questão.")
-            st.rerun() # Redesenha a página para exibir o feedback
+            st.rerun() 
             
-    # Botão para voltar (se não for temporário)
+    # Botão para voltar
     if not is_temp and st.button("Voltar (Sair do Quiz)", key="voltar_final"):
         st.session_state.selected_quiz_id = None
         st.rerun()
@@ -384,7 +392,6 @@ def render_home_page():
     
     if st.session_state.quiz_to_take:
         st.header("🎯 Responder Quiz (Temporário)")
-        # Chama a função implementada
         render_quiz_taker(st.session_state.quiz_to_take, is_temp=True) 
         return
 
@@ -437,7 +444,7 @@ def render_home_page():
         st.markdown("---")
         st.subheader("O que você quer criar com este material?")
         
-        # Botão único para gerar Quiz
+        # Botão único para gerar Quiz 
         if st.button("🚀 Gerar Quiz", use_container_width=True):
             texto, _ = (extract_text_from_pdf(uploaded_file), "PDF") if uploaded_file else (texto_manual, "Texto")
             if not texto: st.warning("Por favor, envie um PDF ou insira texto."); st.stop()
@@ -458,7 +465,7 @@ def render_home_page():
                 else: st.error("Não foi possível gerar nenhuma questão.")
 
 # -------------------------------
-# 📚 Página Disciplinas (Biblioteca)
+# 📚 Página Disciplinas (Biblioteca) 
 # -------------------------------
 def render_disciplinas_page():
     st.header("📚 Minhas Disciplinas")
@@ -497,7 +504,6 @@ def render_disciplinas_page():
                 st.subheader(f"Respondendo: {quiz_data.data['nome']}")
                 st.caption(f"Disciplina: {quiz_data.data['disciplina']}")
                 st.divider()
-                # Chama a função implementada
                 render_quiz_taker(quiz_data.data["questoes"], disciplina_nome=quiz_data.data["disciplina"], is_temp=False)
             else: st.error("Não foi possível carregar o quiz."); st.session_state.selected_quiz_id = None
         except Exception as e: st.error(f"Erro ao buscar quiz: {e}"); st.session_state.selected_quiz_id = None
@@ -650,7 +656,7 @@ def render_configurar_page():
 st.set_page_config(page_title="QuizIA", layout="wide")
 
 # -------------------------------
-# 💾 Inicialização do st.session_state (Removendo Flashcard)
+# 💾 Inicialização do st.session_state
 # -------------------------------
 if "page" not in st.session_state: st.session_state.page = "Home"
 if "generated_quiz" not in st.session_state: st.session_state.generated_quiz = None
