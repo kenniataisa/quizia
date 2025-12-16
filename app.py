@@ -1,4 +1,5 @@
 import streamlit as st
+import base64
 import fitz  # PyMuPDF
 import json
 from supabase import create_client, Client
