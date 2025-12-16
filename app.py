@@ -45,16 +45,36 @@ OPENROUTER_HEADERS = {
 # -------------------------------
 # 📚 Funções de Extração e Chunk (AJUSTADO PARA GRANULARIDADE)
 # -------------------------------
-def extract_text_from_pdf(uploaded_file):
+def extract_content_from_pdf(uploaded_file):
     try:
         doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
-        text = ""
-        for page in doc:
-            text += page.get_text("text") + "\n"
-        return text.strip()
+        content_pages = []
+
+        for page_num, page in enumerate(doc):
+            # 1. Extrair Texto
+            text = page.get_text("text")
+            
+            images_data = []
+            image_list = page.get_images(full=True)
+            
+            for img_index, img in enumerate(image_list):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                
+                base64_str = base64.b64encode(image_bytes).decode("utf-8")
+                images_data.append(f"data:image/png;base64,{base64_str}")
+
+            content_pages.append({
+                "page": page_num + 1,
+                "text": text,
+                "images": images_data # Lista de strings base64
+            })
+            
+        return content_pages
     except Exception as e:
-        st.error(f"Erro ao ler o PDF: {e}")
-        return ""
+        st.error(f"Erro ao ler PDF: {e}")
+        return []
 
 def chunk_text(text, max_chars=2000): # Reduzido para 2000 para forçar mais questões
     """
@@ -112,66 +132,54 @@ def limpar_json_ia(content, tipo_lista=True):
         # st.warning(f"Erro ao decodificar JSON. Conteúdo bruto: {content[:100]}...")
         return None
 
-def gerar_questoes_deepseek(texto, dificuldade, estilo):
+def gerar_questoes_vision_math(pagina_data, dificuldade, estilo):
     """
-    Gera o MÁXIMO de questões possíveis com base no texto.
-    Prompt otimizado para cobertura total (Exhaustive Coverage).
+    Gera questões analisando texto E imagens (gráficos/fórmulas).
     """
+    texto = pagina_data['text']
+    imagens = pagina_data['images']
     
-    # Mapeamento do estilo
-    if "Múltipla Escolha" in estilo:
-        estilo_prompt = "Múltipla escolha (4 alternativas A-D)"
-    elif "Verdadeiro/Falso" in estilo:
-        estilo_prompt = "Verdadeiro ou Falso (resposta deve ser 'V' ou 'F')"
-    elif "Resposta Curta" in estilo:
-        estilo_prompt = "Resposta aberta (pergunta cuja resposta correta seja textual)"
-    elif "Preencher Lacuna" in estilo:
-        estilo_prompt = "Preencher lacuna (fornecer texto com uma lacuna “_____”)"
-    elif "Estilo Misto" in estilo:
-        estilo_prompt = "VARIADO: Misture Múltipla escolha, V/F, Aberta e Lacuna."
-    else:
-        estilo_prompt = "Múltipla escolha (4 alternativas A-D)" 
+    # Adicionamos "Cálculo" explicitamente ao prompt
+    prompt_text = f"""
+    MISSÃO: Analise o texto e as IMAGENS (gráficos, tabelas, fórmulas) desta página.
+    Gere um Quiz focando em interpretação visual e CÁLCULOS MATEMÁTICOS se houver dados para isso.
     
-    prompt = f"""
-MISSÃO: Gerar um Quiz EXAUSTIVO sobre o conteúdo abaixo.
+    CONTEÚDO DA PÁGINA:
+    {texto}
+    
+    CONFIGURAÇÕES:
+    - Nível: {dificuldade}
+    - Estilo: {estilo}
+    
+    INSTRUÇÕES ESPECÍFICAS:
+    1. **VISÃO:** Se houver gráficos ou diagramas nas imagens enviadas, crie questões sobre eles (ex: "Com base no gráfico...").
+    2. **CÁLCULO:** Se houver fórmulas ou números, crie problemas práticos onde o aluno precise calcular a resposta.
+       - Para questões de cálculo, no campo 'trecho_referencia', coloque a resolução passo-a-passo.
+    3. FORMATO JSON ESTRITO (igual ao anterior).
+    """
 
-CONTEÚDO BASE:
-{texto}
-
-CONFIGURAÇÕES:
-- Tipo: {estilo_prompt}
-- Nível: {dificuldade}
-
-INSTRUÇÕES CRÍTICAS (SEM LIMITE DE QUANTIDADE):
-1. **COBERTURA TOTAL:** Analise cada frase do texto. Gere uma questão para CADA conceito, fato, definição, número ou detalhe importante encontrado.
-2. **QUANTIDADE:** Não há limite máximo. Se o texto tiver 20 informações relevantes, gere 20 questões. O objetivo é cobrir 100% do material fornecido neste bloco.
-3. **FIDELIDADE:** Baseie-se APENAS no texto fornecido.
-4. **FORMATO:** Retorne APENAS um JSON válido (lista de objetos).
-
-FORMATO DE RESPOSTA (JSON):
-[
-  {{
-    "tipo": "multipla_escolha" | "vf" | "aberta" | "lacuna",
-    "pergunta": "...",
-    "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."], 
-    "resposta_correta": "...",
-    "trecho_referencia": "copie aqui o trecho EXATO do texto que prova a resposta"
-  }}
-]
-"""
+    # Montagem da mensagem Multimodal (Texto + Imagens)
+    messages_content = [{"type": "text", "text": prompt_text}]
+    
+    # Adiciona as imagens ao payload
+    for img_b64 in imagens:
+        messages_content.append({
+            "type": "image_url",
+            "image_url": {"url": img_b64}
+        })
 
     try:
         response = deepseek_client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="tngtech/deepseek-r1t2-chimera:free",
-            messages=[{"role": "user", "content": prompt}],
+            model=MODELO_VISAO, # Usando Gemini ou GPT-4o
+            messages=[{"role": "user", "content": messages_content}],
         )
         content = response.choices[0].message.content
         return limpar_json_ia(content, tipo_lista=True) or []
     except Exception as e:
-        st.error(f"Erro na API DeepSeek (Quiz): {e}")
+        st.error(f"Erro na API Vision: {e}")
         return []
-
+        
 def refinar_questoes_llama(questoes):
     """Refina as questões geradas."""
     if not questoes: return []
@@ -185,7 +193,7 @@ def refinar_questoes_llama(questoes):
     try:
         response = llama_client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            MODELO_VISAO="meta-llama/llama-3.3-70b-instruct:free",
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
@@ -342,35 +350,34 @@ def render_home_page():
     with tab1: f = st.file_uploader("PDF", type="pdf", label_visibility="collapsed")
     with tab2: t = st.text_area("Texto", height=200, label_visibility="collapsed")
 
-    if st.button("🚀 Gerar Quiz Completo", type="primary"):
-        texto = extract_text_from_pdf(f) if f else t
-        if not texto: st.warning("Sem conteúdo."); st.stop()
+    # Dentro de render_home_page...
+    if st.button("🚀 Gerar Quiz Completo (Texto + Imagens)", type="primary"):
+        if f:
+            # Nova função de extração
+            paginas_conteudo = extract_content_from_pdf(f)
+        else:
+            st.warning("Para análise de imagem, por favor use o upload de PDF.")
+            st.stop()
         
-        # Chunking mais granular
-        chunks = chunk_text(texto, max_chars=2000)
         todas_questoes = []
-        
         bar = st.progress(0)
         status = st.empty()
         
-        for i, chunk in enumerate(chunks):
-            status.text(f"Analisando parte {i+1}/{len(chunks)}... (Extraindo detalhes)")
+        # Loop por página (envia a imagem da página junto com o texto da página)
+        for i, pagina in enumerate(paginas_conteudo):
+            status.text(f"Analisando Página {pagina['page']} (Lendo texto e imagens)...")
             
-            # 1. Geração
-            q_bruta = gerar_questoes_deepseek(chunk, st.session_state.config_dificuldade, st.session_state.config_estilo)
+            # Chama a nova função Vision
+            q_pagina = gerar_questoes_vision_math(pagina, st.session_state.config_dificuldade, st.session_state.config_estilo)
             
-            # 2. Refinamento (Opcional: Pode pular para ganhar velocidade se quiser)
-            if q_bruta:
-                q_refinada = refinar_questoes_llama(q_bruta)
-                todas_questoes.extend(q_refinada)
+            if q_pagina:
+                todas_questoes.extend(q_pagina)
             
-            bar.progress((i+1)/len(chunks))
+            bar.progress((i+1)/len(paginas_conteudo))
             
         if todas_questoes:
             st.session_state.generated_quiz = todas_questoes
             st.rerun()
-        else:
-            st.error("Nenhuma questão gerada. O texto pode ser muito curto ou ilegível.")
 
 # -------------------------------
 # 📚 Página Disciplinas
