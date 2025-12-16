@@ -14,6 +14,8 @@ SUPABASE_URL = st.secrets.get("SUPABASE_URL", "SUA_URL_AQUI")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "SUA_CHAVE_AQUI")
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "SUA_CHAVE_AQUI")
 
+MODELO_VISAO = "google/gemini-2.0-flash-exp:free"
+
 # Configurações Adicionais do OpenRouter
 SITE_URL = "http://quizia.streamlit.app"
 SITE_NAME = "QuizIA App"
@@ -194,14 +196,12 @@ def refinar_questoes_llama(questoes):
     try:
         response = llama_client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            MODELO_VISAO="meta-llama/llama-3.3-70b-instruct:free",
+            model="meta-llama/llama-3.3-70b-instruct:free", # <--- CORRIGIDO AQUI (era MODELO_VISAO=)
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
         return limpar_json_ia(content, tipo_lista=True) or questoes
     except Exception as e:
-        # Se falhar o refino, retorna as originais para não perder dados
-        # st.error(f"Erro na API Llama (Refino): {e}")
         return questoes
 
 def avaliar_resposta_aberta(resposta_usuario, resposta_correta, trecho_referencia):
@@ -351,27 +351,46 @@ def render_home_page():
     with tab1: f = st.file_uploader("PDF", type="pdf", label_visibility="collapsed")
     with tab2: t = st.text_area("Texto", height=200, label_visibility="collapsed")
 
-    # Dentro de render_home_page...
-    if st.button("🚀 Gerar Quiz Completo (Texto + Imagens)", type="primary"):
+    # ... (dentro de render_home_page) ...
+    
+    # Botão de Ação
+    if st.button("🚀 Gerar Quiz Completo", type="primary"):
+        paginas_conteudo = []
+        
+        # 1. Se for PDF
         if f:
-            # Nova função de extração
             paginas_conteudo = extract_content_from_pdf(f)
-        else:
-            st.warning("Para análise de imagem, por favor use o upload de PDF.")
+            
+        # 2. Se for Texto Colado (Fallback)
+        elif t:
+            # Dividimos o texto em pedaços e criamos "páginas falsas" sem imagens
+            chunks = chunk_text(t)
+            for i, chunk in enumerate(chunks):
+                paginas_conteudo.append({
+                    "page": i + 1,
+                    "text": chunk,
+                    "images": [] # Lista vazia, pois não tem imagem
+                })
+        
+        # Validação
+        if not paginas_conteudo:
+            st.warning("Por favor, envie um PDF ou cole um texto.")
             st.stop()
         
+        # 3. Processamento Unificado
         todas_questoes = []
         bar = st.progress(0)
         status = st.empty()
         
-        # Loop por página (envia a imagem da página junto com o texto da página)
         for i, pagina in enumerate(paginas_conteudo):
-            status.text(f"Analisando Página {pagina['page']} (Lendo texto e imagens)...")
+            status.text(f"Analisando Parte {pagina['page']} de {len(paginas_conteudo)}...")
             
-            # Chama a nova função Vision
+            # Chama a IA (Se não tiver imagem, ela analisa só o texto)
             q_pagina = gerar_questoes_vision_math(pagina, st.session_state.config_dificuldade, st.session_state.config_estilo)
             
             if q_pagina:
+                # Opcional: Refinar com Llama (pode descomentar se quiser)
+                # q_pagina = refinar_questoes_llama(q_pagina)
                 todas_questoes.extend(q_pagina)
             
             bar.progress((i+1)/len(paginas_conteudo))
@@ -379,6 +398,8 @@ def render_home_page():
         if todas_questoes:
             st.session_state.generated_quiz = todas_questoes
             st.rerun()
+        else:
+            st.error("Não foi possível gerar questões. Tente outro arquivo.")
 
 # -------------------------------
 # 📚 Página Disciplinas
