@@ -245,18 +245,18 @@ def render_quiz_runner():
 # ------------------------------------------------------------
 def page_home():
     # Cria duas colunas: a primeira estreita para o GIF, a segunda larga para o texto
-col1, col2 = st.columns([0.2, 0.8]) 
+    col1, col2 = st.columns([0.2, 0.8]) 
 
-with col1:
-    st.image("https://media.tenor.com/61a_M0m4M8UAAAAC/cbse-tayari-monu-bhagat.gif", use_container_width=True)
-
-with col2:
-    st.markdown("""
-        <h1 style='margin-top: 0; padding-top: 0;'>
-            Quiz<br>
-            <span style='color: #FF4B4B; font-size: 1.2em;'>IA</span>
-        </h1>
-        """, unsafe_allow_html=True)
+    with col1:
+        st.image("https://media.tenor.com/61a_M0m4M8UAAAAC/cbse-tayari-monu-bhagat.gif", use_container_width=True)
+    
+    with col2:
+        st.markdown("""
+            <h1 style='margin-top: 0; padding-top: 0;'>
+                Quiz<br>
+                <span style='color: #FF4B4B; font-size: 1.2em;'>IA</span>
+            </h1>
+            """, unsafe_allow_html=True)
     
     c1, c2 = st.columns(2)
     disciplina = c1.text_input("Disciplina", placeholder="Ex: Biologia")
