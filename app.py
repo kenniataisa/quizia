@@ -22,7 +22,7 @@ except Exception:
 # Nvidia: Usado APENAS para olhar gráficos (Vision)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free" 
 # Llama 3.3 70B: O "Cérebro" principal. Muito mais capaz de gerar volume (Texto)
-MODELO_TEXTO = "mistralai/devstral-2512:free"
+MODELO_TEXTO = "google/gemini-2.0-flash-exp:free"
 
 SITE_URL = "http://quizia.streamlit.app"
 SITE_NAME = "QuizIA App"
@@ -194,33 +194,70 @@ def carregar_quizzes_db():
 # ------------------------------------------------------------
 # 5. UI DO QUIZ
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 5. UI DO QUIZ (CORRIGIDO)
+# ------------------------------------------------------------
 def render_quiz_runner():
+    # 1. Proteção: Verifica se existem questões carregadas
+    if "questoes" not in st.session_state or not st.session_state.questoes:
+        st.warning("Nenhuma questão carregada. Volte e gere um quiz.")
+        return
+
+    # 2. Inicialização: Garante que o contador existe
+    if "questao_atual" not in st.session_state:
+        st.session_state.questao_atual = 0
+        
+    # 3. Inicialização: Garante que o banco de erros existe
+    if "banco_erros" not in st.session_state:
+        st.session_state.banco_erros = []
+
     questoes = st.session_state.questoes
     i = st.session_state.questao_atual
     
+    # Proteção extra: Se o índice estourar (ex: deletou questões), reseta
+    if i >= len(questoes):
+        st.session_state.questao_atual = 0
+        i = 0
+    
+    # Barra de Progresso
     st.progress((i + 1) / len(questoes))
+    
     q = questoes[i]
     
     st.markdown(f"### Questão {i+1} de {len(questoes)}")
-    st.info(f"📄 Pág {q.get('pagina', '?')} | Fonte: *{q.get('trecho_referencia', '...')[:100]}...*")
+    
+    # Exibe fonte/referência de forma elegante
+    fonte = q.get('trecho_referencia', '...')
+    if len(fonte) > 100: fonte = fonte[:100] + "..."
+    st.info(f"📄 Pág {q.get('pagina', '?')} | Fonte: *{fonte}*")
+    
     st.markdown(f"#### {q['pergunta']}")
 
-    resposta = st.radio("Alternativas:", q["opcoes"], key=f"resp_{i}", index=None)
+    # Radio button com chave única para não conflitar
+    resposta = st.radio(
+        "Alternativas:", 
+        q["opcoes"], 
+        key=f"resp_{i}_{id(q)}", # Key única baseada no ID da questão
+        index=None
+    )
 
     if st.button("Verificar Resposta"):
         if not resposta:
             st.warning("Selecione uma opção!")
         else:
+            # Lógica de correção (Pega primeira letra)
             letra_user = resposta.strip()[0].upper()
-            letra_gabarito = q["resposta_correta"].strip()[0].upper()
+            gabarito_raw = q.get("resposta_correta", "A")
+            letra_gabarito = gabarito_raw.strip()[0].upper()
             
             if letra_user == letra_gabarito:
                 st.success("✅ Resposta Correta!")
+                st.balloons()
             else:
                 st.error(f"❌ Incorreto. Correta: {letra_gabarito}")
                 st.markdown(f"**Gabarito:** {q['resposta_correta']}")
                 
-                # Salva erro
+                # Salva no banco de erros se não existir
                 erro_existente = any(e['pergunta'] == q['pergunta'] for e in st.session_state.banco_erros)
                 if not erro_existente:
                     st.session_state.banco_erros.append({
@@ -230,6 +267,7 @@ def render_quiz_runner():
                         "expl": q.get('trecho_referencia', '')
                     })
 
+    # Botões de Navegação
     c1, c2 = st.columns([1, 1])
     with c1:
         if st.button("⬅️ Anterior") and i > 0:
