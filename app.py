@@ -244,17 +244,17 @@ def render_quiz_runner():
 # 6. PÁGINAS
 # ------------------------------------------------------------
 def page_home():
-    # Cria duas colunas: a primeira estreita para o GIF, a segunda larga para o texto
-    col1, col2 = st.columns([0.2, 0.8]) 
-
+    col1, col2 = st.columns([0.15, 0.85]) 
+    
     with col1:
-        st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", use_container_width=True)
+        st.image("https://media.tenor.com/61a_M0m4M8UAAAAC/cbse-tayari-monu-bhagat.gif", width=80)
     
     with col2:
+        # margin-top: 0 remove o espaço em branco acima do título
+        # vertical-align ajuda a centralizar com a imagem se precisar
         st.markdown("""
             <h1 style='margin-top: 0; padding-top: 0;'>
-                Quiz<br>
-                <span style='color: #FF4B4B; font-size: 1.2em;'>IA</span>
+                Quiz<span style='color: #9370DB;'>IA</span>
             </h1>
             """, unsafe_allow_html=True)
     
