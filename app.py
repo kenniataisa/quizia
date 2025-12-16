@@ -247,7 +247,7 @@ def page_home():
     col1, col2 = st.columns([0.15, 0.85]) 
     
     with col1:
-        st.image("https://media.tenor.com/61a_M0m4M8UAAAAC/cbse-tayari-monu-bhagat.gif", width=80)
+        st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", width=80)
     
     with col2:
         # margin-top: 0 remove o espaço em branco acima do título
