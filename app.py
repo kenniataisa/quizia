@@ -244,7 +244,7 @@ def render_quiz_runner():
 # 6. PÁGINAS
 # ------------------------------------------------------------
 def page_home():
-    col1, col2 = st.columns([0.15, 0.85]) 
+    col1, col2 = st.columns([0.25, 0.85]) 
     
     with col1:
         st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", width=80)
