@@ -14,7 +14,7 @@ SUPABASE_URL = st.secrets.get("SUPABASE_URL", "SUA_URL_AQUI")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "SUA_CHAVE_AQUI")
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "SUA_CHAVE_AQUI")
 
-MODELO_VISAO = "google/gemini-2.0-flash-exp:free"
+MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free"
 
 # Configurações Adicionais do OpenRouter
 SITE_URL = "http://quizia.streamlit.app"
@@ -174,7 +174,7 @@ def gerar_questoes_vision_math(pagina_data, dificuldade, estilo):
     try:
         response = deepseek_client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model=MODELO_VISAO, # Usando Gemini ou GPT-4o
+            model=MODELO_VISAO,
             messages=[{"role": "user", "content": messages_content}],
         )
         content = response.choices[0].message.content
@@ -196,7 +196,7 @@ def refinar_questoes_llama(questoes):
     try:
         response = llama_client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="meta-llama/llama-3.3-70b-instruct:free", # <--- CORRIGIDO AQUI (era MODELO_VISAO=)
+            model="nvidia/nemotron-nano-12b-v2-vl:free", # <--- CORRIGIDO AQUI (era MODELO_VISAO=)
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
@@ -224,7 +224,7 @@ def avaliar_resposta_aberta(resposta_usuario, resposta_correta, trecho_referenci
     try:
         response = client.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            model="nvidia/nemotron-nano-12b-v2-vl:free",
             messages=[{"role": "user", "content": prompt}],
         )
         return limpar_json_ia(response.choices[0].message.content, tipo_lista=False)
