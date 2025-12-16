@@ -50,33 +50,37 @@ OPENROUTER_HEADERS = {
 # -------------------------------
 def extract_content_from_pdf(uploaded_file):
     try:
-        doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+        file_bytes = uploaded_file.read()
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        
         content_pages = []
 
         for page_num, page in enumerate(doc):
-            # 1. Extrair Texto
+            # 1. Extrair Texto (ajuda a IA a copiar frases exatas)
             text = page.get_text("text")
             
-            images_data = []
-            image_list = page.get_images(full=True)
+            # matrix=fitz.Matrix(2, 2) dobra a resolução (zoom) para a IA ler letras pequenas
+            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
             
-            for img_index, img in enumerate(image_list):
-                xref = img[0]
-                base_image = doc.extract_image(xref)
-                image_bytes = base_image["image"]
-                
-                base64_str = base64.b64encode(image_bytes).decode("utf-8")
-                images_data.append(f"data:image/png;base64,{base64_str}")
+            # Converter para formato PNG em memória
+            img_bytes = pix.tobytes("png")
+            
+            # Converter para Base64
+            base64_str = base64.b64encode(img_bytes).decode("utf-8")
+            
+            # Lista contendo APENAS a imagem da página completa
+            # Formato Data URI necessário para APIs web
+            images_data = [f"data:image/png;base64,{base64_str}"]
 
             content_pages.append({
                 "page": page_num + 1,
                 "text": text,
-                "images": images_data # Lista de strings base64
+                "images": images_data 
             })
             
         return content_pages
     except Exception as e:
-        st.error(f"Erro ao ler PDF: {e}")
+        st.error(f"Erro ao processar PDF: {e}")
         return []
 
 def chunk_text(text, max_chars=2000): # Reduzido para 2000 para forçar mais questões
