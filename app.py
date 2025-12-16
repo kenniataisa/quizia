@@ -22,7 +22,7 @@ except Exception:
 # Nvidia: Usado APENAS para olhar gráficos (Vision)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free" 
 # Llama 3.3 70B: O "Cérebro" principal. Muito mais capaz de gerar volume (Texto)
-MODELO_TEXTO = "tngtech/deepseek-r1t2-chimera:free"
+MODELO_TEXTO = "mistralai/devstral-2512:free"
 
 SITE_URL = "http://quizia.streamlit.app"
 SITE_NAME = "QuizIA App"
