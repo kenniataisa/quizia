@@ -1,526 +1,242 @@
+# ============================================================
+# QUIZIA - VERSÃO COM CONTROLE PEDAGÓGICO E PAGINAÇÃO
+# ============================================================
+
 import streamlit as st
 import base64
-import fitz  # PyMuPDF
+import fitz
 import json
-from supabase import create_client, Client
-from openai import OpenAI
 import time
 import re
+from supabase import create_client, Client
+from openai import OpenAI
 
-# -------------------------------
-# 🔑 Configurações
-# -------------------------------
-SUPABASE_URL = st.secrets.get("SUPABASE_URL", "SUA_URL_AQUI")
-SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "SUA_CHAVE_AQUI")
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "SUA_CHAVE_AQUI")
+# ------------------------------------------------------------
+# CONFIGURAÇÕES
+# ------------------------------------------------------------
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
 
-# Modelo de Visão escolhido (Nvidia)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free"
+MODELO_TEXTO = "meta-llama/llama-3.3-70b-instruct:free"
 
-# Configurações Adicionais do OpenRouter
 SITE_URL = "http://quizia.streamlit.app"
 SITE_NAME = "QuizIA App"
 
-if SUPABASE_URL == "SUA_URL_AQUI" or SUPABASE_KEY == "SUA_CHAVE_AQUI" or OPENROUTER_API_KEY == "SUA_CHAVE_AQUI":
-    st.error("As chaves de API (Supabase, OpenRouter) não foram configuradas nos 'Secrets' do Streamlit.")
-    st.stop()
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-# -------------------------------
-# 🔧 Inicializa clientes OpenRouter
-# -------------------------------
+# ------------------------------------------------------------
+# CLIENTE OPENROUTER
+# ------------------------------------------------------------
 def create_openrouter_client():
-    """Cria e retorna o cliente OpenAI configurado para OpenRouter."""
     return OpenAI(
         base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY,
+        api_key=OPENROUTER_API_KEY
     )
 
-# Cliente principal
 client_ai = create_openrouter_client()
 
-# Headers de Rastreamento
-OPENROUTER_HEADERS = {
+HEADERS = {
     "HTTP-Referer": SITE_URL,
-    "X-Title": SITE_NAME,
+    "X-Title": SITE_NAME
 }
 
-# -------------------------------
-# 📚 Funções de Extração (Screenshot)
-# -------------------------------
+# ------------------------------------------------------------
+# EXTRAÇÃO PDF
+# ------------------------------------------------------------
 def extract_content_from_pdf(uploaded_file):
-    """
-    Converte cada página do PDF em uma imagem única (Screenshot) + Texto.
-    Isso evita o limite de 10 imagens por prompt e melhora a leitura da IA.
-    """
-    try:
-        file_bytes = uploaded_file.read()
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        
-        content_pages = []
+    doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
+    pages = []
 
-        for page_num, page in enumerate(doc):
-            # 1. Extrair Texto (ajuda a IA a copiar frases exatas)
-            text = page.get_text("text")
-            
-            # 2. Renderizar a PÁGINA INTEIRA como imagem (Rasterização)
-            # matrix=fitz.Matrix(2, 2) dobra a resolução para a IA ler letras pequenas
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
-            
-            # Converter para formato PNG em memória
-            img_bytes = pix.tobytes("png")
-            
-            # Converter para Base64
-            base64_str = base64.b64encode(img_bytes).decode("utf-8")
-            
-            # Lista contendo APENAS a imagem da página completa
-            images_data = [f"data:image/png;base64,{base64_str}"]
+    for i, page in enumerate(doc):
+        text = page.get_text()
+        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+        img_b64 = base64.b64encode(pix.tobytes("png")).decode()
 
-            content_pages.append({
-                "page": page_num + 1,
-                "text": text,
-                "images": images_data 
-            })
-            
-        return content_pages
-    except Exception as e:
-        st.error(f"Erro ao processar PDF: {e}")
-        return []
-
-def chunk_text(text, max_chars=2000):
-    """Divide o texto em chunks menores para processamento de texto puro."""
-    paragraphs = text.split("\n")
-    chunks = []
-    current_chunk = ""
-    
-    for para in paragraphs:
-        para_com_espaco = para + "\n"
-        if len(current_chunk) + len(para_com_espaco) > max_chars:
-            if current_chunk:
-                chunks.append(current_chunk.strip())
-            if len(para_com_espaco) > max_chars:
-                for i in range(0, len(para_com_espaco), max_chars):
-                    chunks.append(para_com_espaco[i:i + max_chars].strip())
-                current_chunk = "" 
-            else:
-                current_chunk = para_com_espaco
-        else:
-            current_chunk += para_com_espaco
-            
-    if current_chunk:
-        chunks.append(current_chunk.strip())
-        
-    return chunks
-
-# -------------------------------
-# 🤖 Funções de Geração e Limpeza
-# -------------------------------
-def limpar_json_ia(content, tipo_lista=True):
-    """Tenta extrair um objeto JSON de uma string de resposta da IA."""
-    if not content: return None
-    
-    # Remove blocos de código markdown ```json ... ```
-    content = re.sub(r'```json\s*', '', content)
-    content = re.sub(r'```', '', content)
-    
-    if tipo_lista:
-        match = re.search(r'\[.*\]', content, re.DOTALL)
-    else:
-        match = re.search(r'\{.*\}', content, re.DOTALL)
-        
-    if match:
-        json_text = match.group(0)
-    else:
-        json_text = content
-        
-    try:
-        return json.loads(json_text)
-    except json.JSONDecodeError:
-        return None
-
-def normalizar_questoes(lista_raw):
-    """
-    Padroniza as chaves do JSON (aceita inglês ou português) e remove itens incompletos.
-    Isso corrige o bug de questões vazias.
-    """
-    if not isinstance(lista_raw, list):
-        return []
-
-    lista_limpa = []
-    
-    for item in lista_raw:
-        # Tenta encontrar a PERGUNTA em várias chaves
-        pergunta = item.get('pergunta') or item.get('question') or item.get('statement')
-        # Tenta encontrar as OPÇÕES
-        opcoes = item.get('opcoes') or item.get('options') or item.get('choices')
-        # Tenta encontrar a RESPOSTA CORRETA
-        correta = item.get('resposta_correta') or item.get('answer') or item.get('correct_answer') or item.get('correct')
-        # Outros campos
-        tipo = item.get('tipo') or item.get('type') or 'multipla_escolha'
-        trecho = item.get('trecho_referencia') or item.get('context') or ''
-
-        # Validação Básica
-        if pergunta:
-            # Se for múltipla escolha, precisa ter opções
-            if tipo in ['multipla_escolha', 'multi_choice'] and (not opcoes or not isinstance(opcoes, list)):
-                continue 
-            
-            novo_item = {
-                "pergunta": pergunta,
-                "opcoes": opcoes if isinstance(opcoes, list) else [],
-                "resposta_correta": correta,
-                "tipo": "multipla_escolha" if tipo in ['multipla_escolha', 'multi_choice'] else tipo,
-                "trecho_referencia": trecho
-            }
-            lista_limpa.append(novo_item)
-            
-    return lista_limpa
-
-def gerar_questoes_vision_math(pagina_data, dificuldade, estilo):
-    """
-    Gera questões analisando texto E imagens com sistema de RETRY.
-    """
-    texto = pagina_data['text']
-    imagens = pagina_data['images']
-    
-    prompt_text = f"""
-    MISSÃO: Analise o texto e as IMAGENS (gráficos, tabelas, fórmulas) desta página.
-    Gere um Quiz focando em interpretação visual e CÁLCULOS MATEMÁTICOS se houver dados para isso.
-    
-    CONTEÚDO DA PÁGINA:
-    {texto}
-    
-    CONFIGURAÇÕES:
-    - Nível: {dificuldade}
-    - Estilo: {estilo}
-    
-    INSTRUÇÕES ESPECÍFICAS:
-    1. **VISÃO:** Se houver gráficos ou diagramas, crie questões sobre eles.
-    2. **CÁLCULO:** Se houver fórmulas, crie problemas práticos.
-       - No campo 'trecho_referencia', coloque a resolução passo-a-passo.
-    3. FORMATO JSON ESTRITO (Responda APENAS o JSON):
-    [
-      {{
-        "pergunta": "...",
-        "opcoes": ["A)...", "B)..."], 
-        "resposta_correta": "...",
-        "trecho_referencia": "...",
-        "tipo": "multipla_escolha"
-      }}
-    ]
-    """
-
-    messages_content = [{"type": "text", "text": prompt_text}]
-    
-    # Adiciona a imagem única da página
-    for img_b64 in imagens:
-        messages_content.append({
-            "type": "image_url",
-            "image_url": {"url": img_b64}
+        pages.append({
+            "page": i + 1,
+            "text": text,
+            "images": [f"data:image/png;base64,{img_b64}"]
         })
 
-    # Lógica de Retry (3 tentativas)
-    max_tentativas = 3
-    for tentativa in range(max_tentativas):
-        try:
-            response = client_ai.chat.completions.create(
-                extra_headers=OPENROUTER_HEADERS,
-                model=MODELO_VISAO, # Usando NVIDIA
-                messages=[{"role": "user", "content": messages_content}],
-            )
-            content = response.choices[0].message.content
-            questoes_raw = limpar_json_ia(content, tipo_lista=True)
-            
-            # Se falhou em extrair JSON, tenta limpar markdown extra
-            if not questoes_raw:
-                 # fallback simples
-                 pass 
+    return pages
 
-            return normalizar_questoes(questoes_raw) or []
-            
-        except Exception as e:
-            if "429" in str(e): # Rate Limit
-                time.sleep((tentativa + 1) * 2) # Espera progressiva
-            else:
-                st.error(f"Erro na API Vision ({MODELO_VISAO}): {e}")
-                return []
-    
-    st.warning("IA Ocupada. Tente novamente em instantes.")
-    return []
+# ------------------------------------------------------------
+# LIMPEZA JSON
+# ------------------------------------------------------------
+def limpar_json_ia(content):
+    content = re.sub(r"```json|```", "", content)
+    match = re.search(r"\[.*\]", content, re.DOTALL)
+    if not match:
+        return []
+    try:
+        return json.loads(match.group())
+    except:
+        return []
 
-def refinar_questoes_llama(questoes):
-    """Refina as questões geradas usando um modelo de Texto Forte (Llama 70B)."""
-    if not questoes: return []
+# ------------------------------------------------------------
+# FILTRO PEDAGÓGICO (ANTI QUESTÃO SEM SENTIDO)
+# ------------------------------------------------------------
+def questao_pedagogica(q):
+    blacklist = [
+        "cor", "cores", "layout", "design",
+        "estilo visual", "formatação", "fonte"
+    ]
+    texto = q["pergunta"].lower()
+    return not any(b in texto for b in blacklist)
+
+# ------------------------------------------------------------
+# GERAÇÃO DE QUESTÕES (VISÃO CONTROLADA)
+# ------------------------------------------------------------
+def gerar_questoes(pagina, dificuldade, estilo):
     prompt = f"""
-    Atue como um professor experiente. Revise as questões abaixo para garantir clareza, correção gramatical e didática.
-    Mantenha o formato JSON estritamente idêntico. Não remova questões.
-    
-    Questões:
-    {json.dumps(questoes, ensure_ascii=False, indent=2)}
-    """
-    try:
-        response = client_ai.chat.completions.create(
-            extra_headers=OPENROUTER_HEADERS,
-            model="meta-llama/llama-3.3-70b-instruct:free", # Mantendo 70B para garantir JSON perfeito
-            messages=[{"role": "user", "content": prompt}],
-        )
-        content = response.choices[0].message.content
-        questoes_refinadas = limpar_json_ia(content, tipo_lista=True)
-        return normalizar_questoes(questoes_refinadas) or questoes
-    except Exception as e:
-        # Se der erro no refino, retorna as originais para não perder o trabalho da Nvidia
-        return questoes
+MISSÃO:
+Analise o texto e a imagem da página e gere questões PEDAGÓGICAS.
 
-def avaliar_resposta_aberta(resposta_usuario, resposta_correta, trecho_referencia):
-    """Avaliação inteligente de respostas abertas."""
-    prompt = f"""
-    Avalie a resposta do aluno.
-    ALUNO: {resposta_usuario}
-    GABARITO: {resposta_correta}
-    FONTE: {trecho_referencia}
-    Retorne JSON: {{ "similaridade": 0-100, "correto": true/false, "explicacao": "..." }}
-    """
-    try:
-        response = client_ai.chat.completions.create(
-            extra_headers=OPENROUTER_HEADERS,
-            model="meta-llama/llama-3.3-70b-instruct:free",
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return limpar_json_ia(response.choices[0].message.content, tipo_lista=False)
-    except Exception:
-        return {"similaridade": 0, "correto": False, "explicacao": "Erro na avaliação."}
+REGRAS OBRIGATÓRIAS:
+- Só crie perguntas visuais se houver:
+  • gráficos com dados
+  • tabelas
+  • fórmulas
+  • diagramas explicativos
+- NÃO crie perguntas sobre:
+  • cores decorativas
+  • layout
+  • estilo visual
+  • design gráfico
 
-# -------------------------------
-# 💾 Funções do Supabase
-# -------------------------------
-def salvar_quiz(disciplina, nome, questoes):
-    try:
-        data = { "nome": nome, "disciplina": disciplina, "questoes": json.dumps(questoes) }
-        supabase.table("quizzes").insert(data).execute()
-        return True
-    except Exception as e:
-        st.error(f"Erro ao salvar o quiz: {e}"); return False
+REGRA DE OURO:
+Se a pergunta não puder ser respondida estudando o CONTEÚDO, NÃO CRIE.
 
-def deletar_item_supabase(id, tipo):
-    tabela = "quizzes"
-    try:
-        supabase.table(tabela).delete().eq("id", id).execute()
-        st.toast(f"{tipo.capitalize()} deletado!", icon="🗑️")
-        return True
-    except Exception as e:
-        st.error(f"Erro ao deletar: {e}"); return False
+CONTEÚDO:
+{pagina["text"]}
 
-# -------------------------------
-# 🎯 Funções de Renderização de UI
-# -------------------------------
-def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
-    """Interface para responder ao quiz."""
-    try:
-        questoes = json.loads(questoes_json) if isinstance(questoes_json, str) else questoes_json
-    except json.JSONDecodeError:
-        st.error("Erro ao carregar questões."); return
+FORMATO JSON (APENAS):
+[
+  {{
+    "pergunta": "...",
+    "opcoes": ["A)...", "B)..."],
+    "resposta_correta": "...",
+    "trecho_referencia": "Trecho literal do PDF",
+    "pagina": {pagina["page"]},
+    "tipo": "multipla_escolha"
+  }}
+]
+"""
 
-    st.subheader(f"📝 Quiz: {len(questoes)} Questões")
-    
-    quiz_id = id(questoes) 
-    
-    if f"respostas_{quiz_id}" not in st.session_state:
-        st.session_state[f"respostas_{quiz_id}"] = {}
-    if f"verificado_{quiz_id}" not in st.session_state:
-        st.session_state[f"verificado_{quiz_id}"] = False
+    messages = [{"type": "text", "text": prompt}]
+    for img in pagina["images"]:
+        messages.append({"type": "image_url", "image_url": {"url": img}})
 
-    if not is_temp and st.button("← Voltar"):
-        st.session_state.selected_quiz_id = None; st.rerun()
-
-    st.markdown("---")
-
-    with st.form(key=f"form_{quiz_id}"):
-        respostas_temp = {}
-        
-        for i, q in enumerate(questoes):
-            st.markdown(f"**{i+1}. {q.get('pergunta', '')}**")
-            tipo = q.get("tipo", "multipla_escolha")
-            r_key = f"q_{quiz_id}_{i}"
-            
-            if tipo == "multipla_escolha":
-                respostas_temp[i] = st.radio("Opções:", q.get("opcoes", []), index=None, key=r_key, label_visibility="collapsed")
-            elif tipo == "vf":
-                respostas_temp[i] = st.radio("Opções:", ["V", "F"], index=None, key=r_key, label_visibility="collapsed")
-            else:
-                respostas_temp[i] = st.text_area("Resposta:", key=r_key, label_visibility="collapsed")
-
-            if st.session_state[f"verificado_{quiz_id}"]:
-                user_resp = st.session_state[f"respostas_{quiz_id}"].get(i)
-                correta = q.get("resposta_correta", "")
-                
-                if tipo in ["multipla_escolha", "vf", "lacuna"]:
-                    acertou = False
-                    if user_resp and user_resp.lower().strip() in correta.lower().strip(): acertou = True
-                    if tipo == "multipla_escolha" and user_resp and user_resp.split(')')[0] == correta.split(')')[0]: acertou = True
-                    
-                    if acertou: st.success("✅ Correto!")
-                    else: 
-                        st.error(f"❌ Errado. Correta: {correta}")
-                        st.caption(f"📖 Fonte: {q.get('trecho_referencia')}")
-                elif tipo == "aberta":
-                    st.info(f"💡 Gabarito sugerido: {correta}")
-
-            st.markdown("---")
-
-        if st.form_submit_button("✅ Finalizar e Corrigir"):
-            st.session_state[f"respostas_{quiz_id}"] = respostas_temp
-            st.session_state[f"verificado_{quiz_id}"] = True
-            st.rerun()
-
-def render_home_page():
-    if st.session_state.quiz_to_take:
-        render_quiz_taker(st.session_state.quiz_to_take, is_temp=True)
-        return
-
-    st.title("🧠 QuizIA - Modo Exaustivo")
-    st.info("Geração com IA Visual (Nvidia) + Refino (Llama 70B)")
-    
-    if st.session_state.show_save_form:
-        with st.form("save"):
-            st.subheader("💾 Salvar Quiz Gerado")
-            disc = st.text_input("Disciplina")
-            nome = st.text_input("Nome do Quiz")
-            if st.form_submit_button("Salvar"):
-                if salvar_quiz(disc, nome, st.session_state.generated_quiz):
-                    st.success("Salvo!"); st.session_state.generated_quiz = None; st.session_state.show_save_form = None; st.rerun()
-        if st.button("Cancelar"): st.session_state.show_save_form = None; st.rerun()
-        return
-
-    if st.session_state.generated_quiz:
-        st.success(f"🎉 **{len(st.session_state.generated_quiz)} questões geradas!**")
-        c1, c2, c3 = st.columns(3)
-        if c1.button("💾 Salvar"): st.session_state.show_save_form = True; st.rerun()
-        if c2.button("📝 Responder Agora"): st.session_state.quiz_to_take = st.session_state.generated_quiz; st.session_state.generated_quiz = None; st.rerun()
-        if c3.button("🗑️ Descartar"): st.session_state.generated_quiz = None; st.rerun()
-        return
-
-    tab1, tab2 = st.tabs(["Upload PDF", "Colar Texto"])
-    with tab1: f = st.file_uploader("PDF", type="pdf", label_visibility="collapsed")
-    with tab2: t = st.text_area("Texto", height=200, label_visibility="collapsed")
-
-    # Botão de Ação Unificado
-    if st.button("🚀 Gerar Quiz Completo", type="primary"):
-        paginas_conteudo = []
-        
-        # 1. Se for PDF
-        if f:
-            paginas_conteudo = extract_content_from_pdf(f)
-            
-        # 2. Se for Texto Colado (Fallback)
-        elif t:
-            chunks = chunk_text(t)
-            for i, chunk in enumerate(chunks):
-                paginas_conteudo.append({
-                    "page": i + 1,
-                    "text": chunk,
-                    "images": [] 
-                })
-        
-        if not paginas_conteudo:
-            st.warning("Por favor, envie um PDF ou cole um texto.")
-            st.stop()
-        
-        todas_questoes = []
-        bar = st.progress(0)
-        status = st.empty()
-        
-        for i, pagina in enumerate(paginas_conteudo):
-            status.text(f"Analisando Página {pagina['page']} de {len(paginas_conteudo)}...")
-            
-            # Chama a IA de Visão (Nvidia)
-            q_pagina = gerar_questoes_vision_math(pagina, st.session_state.config_dificuldade, st.session_state.config_estilo)
-            
-            if q_pagina:
-                # Chama a IA de Refino (Llama 70B) para melhorar o texto
-                q_pagina_refinada = refinar_questoes_llama(q_pagina)
-                todas_questoes.extend(q_pagina_refinada)
-            
-            bar.progress((i+1)/len(paginas_conteudo))
-            
-        if todas_questoes:
-            st.session_state.generated_quiz = todas_questoes
-            st.rerun()
-        else:
-            st.error("Não foi possível gerar questões. Tente outro arquivo ou verifique a conexão.")
-
-# -------------------------------
-# 📚 Página Disciplinas
-# -------------------------------
-def render_disciplinas_page():
-    st.header("Minha Biblioteca")
-    
-    if st.session_state.selected_quiz_id:
-        data = supabase.table("quizzes").select("*").eq("id", st.session_state.selected_quiz_id).single().execute()
-        if data.data:
-            render_quiz_taker(data.data['questoes'], data.data['disciplina'])
-        else:
-            st.error("Erro ao abrir."); st.session_state.selected_quiz_id = None
-        return
-
-    try:
-        resp = supabase.table("quizzes").select("id, nome, disciplina").execute()
-        if not resp.data: st.info("Nada salvo ainda."); return
-        
-        from collections import defaultdict
-        disc_map = defaultdict(list)
-        for item in resp.data: disc_map[item['disciplina']].append(item)
-        
-        for disc, itens in disc_map.items():
-            with st.expander(f"📂 {disc}", expanded=True):
-                for q in itens:
-                    c1, c2 = st.columns([0.85, 0.15])
-                    if c1.button(f"📝 {q['nome']}", key=q['id']):
-                        st.session_state.selected_quiz_id = q['id']; st.rerun()
-                    if c2.button("❌", key=f"del_{q['id']}"):
-                        deletar_item_supabase(q['id'], "quiz"); st.rerun()
-    except Exception as e:
-        st.error(f"Erro de conexão: {e}")
-
-# -------------------------------
-# ⚙️ Configuração
-# -------------------------------
-def render_configurar_page():
-    st.header("Preferências de IA")
-    
-    st.session_state.config_dificuldade = st.radio(
-        "Dificuldade", 
-        ["Padrão (Recomendado)", "Fácil (Foco em Conceitos)", "Difícil (Análise Crítica)"],
-        index=0
-    )
-    
-    st.session_state.config_estilo = st.selectbox(
-        "Estilo das Questões",
-        ["Múltipla Escolha (Padrão)", "Verdadeiro/Falso", "Resposta Curta (beta)", "Preencher Lacuna", "Estilo Misto (Todos os tipos)"],
-        index=4
+    response = client_ai.chat.completions.create(
+        model=MODELO_VISAO,
+        messages=[{"role": "user", "content": messages}],
+        extra_headers=HEADERS
     )
 
-# -------------------------------
-# 🚦 Main Loop
-# -------------------------------
-st.set_page_config(page_title="QuizIA Pro", layout="centered")
+    raw = limpar_json_ia(response.choices[0].message.content)
+    return [q for q in raw if questao_pedagogica(q)]
 
-defaults = {
-    "page": "Home", "generated_quiz": None, "show_save_form": None,
-    "quiz_to_take": None, "selected_quiz_id": None, "error_log": [],
-    "config_dificuldade": "Padrão (Recomendado)", 
-    "config_estilo": "Estilo Misto (Todos os tipos)",
-    "confirm_delete_id": None
-}
-for k, v in defaults.items():
-    if k not in st.session_state: st.session_state[k] = v
+# ------------------------------------------------------------
+# INTERFACE DE QUIZ (1 QUESTÃO POR VEZ)
+# ------------------------------------------------------------
+def render_quiz(questoes):
+    if "questao_atual" not in st.session_state:
+        st.session_state.questao_atual = 0
+
+    if "banco_erros" not in st.session_state:
+        st.session_state.banco_erros = []
+
+    i = st.session_state.questao_atual
+    q = questoes[i]
+
+    st.markdown(f"### Questão {i+1}/{len(questoes)}")
+    st.markdown(q["pergunta"])
+
+    resposta = st.radio(
+        "Escolha:",
+        q["opcoes"],
+        key=f"resp_{i}",
+        index=None
+    )
+
+    if resposta:
+        correta = q["resposta_correta"]
+        acertou = resposta.split(")")[0] == correta.split(")")[0]
+
+        if acertou:
+            st.success("✅ Correto!")
+        else:
+            st.error("❌ Errado")
+            st.info(f"✔️ Correta: {correta}")
+            st.caption(f"📖 Página {q['pagina']} — {q['trecho_referencia']}")
+
+            st.session_state.banco_erros.append({
+                "pergunta": q["pergunta"],
+                "sua": resposta,
+                "correta": correta,
+                "fonte": q["trecho_referencia"],
+                "pagina": q["pagina"]
+            })
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("⬅️ Anterior") and i > 0:
+            st.session_state.questao_atual -= 1
+            st.rerun()
+    with col2:
+        if st.button("➡️ Próxima") and i < len(questoes) - 1:
+            st.session_state.questao_atual += 1
+            st.rerun()
+
+# ------------------------------------------------------------
+# BANCO DE ERROS
+# ------------------------------------------------------------
+def render_banco_erros():
+    st.header("❌ Banco de Erros")
+
+    if not st.session_state.banco_erros:
+        st.success("Nenhum erro até agora 🎉")
+        return
+
+    for i, e in enumerate(st.session_state.banco_erros):
+        st.markdown(f"**{i+1}. {e['pergunta']}**")
+        st.error(f"Sua resposta: {e['sua']}")
+        st.success(f"Correta: {e['correta']}")
+        st.caption(f"📄 Página {e['pagina']} — {e['fonte']}")
+        st.markdown("---")
+
+# ------------------------------------------------------------
+# MAIN
+# ------------------------------------------------------------
+st.set_page_config("QuizIA", layout="centered")
+
+if "page" not in st.session_state:
+    st.session_state.page = "home"
 
 with st.sidebar:
-    st.title("QuizIA")
-    if st.button("🏠 Criar Quiz"): st.session_state.page = "Home"; st.session_state.generated_quiz = None; st.rerun()
-    if st.button("📚 Meus Quizzes"): st.session_state.page = "Disciplinas"; st.session_state.selected_quiz_id = None; st.rerun()
-    if st.button("⚙️ Configurar"): st.session_state.page = "Configurar"; st.rerun()
+    if st.button("🏠 Criar Quiz"):
+        st.session_state.page = "home"
+    if st.button("❌ Banco de Erros"):
+        st.session_state.page = "erros"
 
-if st.session_state.page == "Home": render_home_page()
-elif st.session_state.page == "Disciplinas": render_disciplinas_page()
-elif st.session_state.page == "Configurar": render_configurar_page()
+if st.session_state.page == "erros":
+    render_banco_erros()
+else:
+    st.title("🧠 QuizIA – Aprendizado Real")
+
+    pdf = st.file_uploader("Envie o PDF", type="pdf")
+    if pdf and st.button("🚀 Gerar Quiz"):
+        paginas = extract_content_from_pdf(pdf)
+        questoes = []
+        for p in paginas:
+            questoes.extend(gerar_questoes(p, "Padrão", "Misto"))
+
+        if questoes:
+            st.session_state.questoes = questoes
+            st.session_state.questao_atual = 0
+            st.rerun()
+
+    if "questoes" in st.session_state:
+        render_quiz(st.session_state.questoes)
