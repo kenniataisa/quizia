@@ -14,6 +14,7 @@ SUPABASE_URL = st.secrets.get("SUPABASE_URL", "SUA_URL_AQUI")
 SUPABASE_KEY = st.secrets.get("SUPABASE_KEY", "SUA_CHAVE_AQUI")
 OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY", "SUA_CHAVE_AQUI")
 
+# Modelo de Visão escolhido (Nvidia)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free"
 
 # Configurações Adicionais do OpenRouter
@@ -36,8 +37,8 @@ def create_openrouter_client():
         api_key=OPENROUTER_API_KEY,
     )
 
-deepseek_client = create_openrouter_client()
-llama_client = create_openrouter_client()
+# Cliente principal
+client_ai = create_openrouter_client()
 
 # Headers de Rastreamento
 OPENROUTER_HEADERS = {
@@ -46,9 +47,13 @@ OPENROUTER_HEADERS = {
 }
 
 # -------------------------------
-# 📚 Funções de Extração e Chunk (AJUSTADO PARA GRANULARIDADE)
+# 📚 Funções de Extração (Screenshot)
 # -------------------------------
 def extract_content_from_pdf(uploaded_file):
+    """
+    Converte cada página do PDF em uma imagem única (Screenshot) + Texto.
+    Isso evita o limite de 10 imagens por prompt e melhora a leitura da IA.
+    """
     try:
         file_bytes = uploaded_file.read()
         doc = fitz.open(stream=file_bytes, filetype="pdf")
@@ -59,7 +64,8 @@ def extract_content_from_pdf(uploaded_file):
             # 1. Extrair Texto (ajuda a IA a copiar frases exatas)
             text = page.get_text("text")
             
-            # matrix=fitz.Matrix(2, 2) dobra a resolução (zoom) para a IA ler letras pequenas
+            # 2. Renderizar a PÁGINA INTEIRA como imagem (Rasterização)
+            # matrix=fitz.Matrix(2, 2) dobra a resolução para a IA ler letras pequenas
             pix = page.get_pixmap(matrix=fitz.Matrix(2, 2)) 
             
             # Converter para formato PNG em memória
@@ -69,7 +75,6 @@ def extract_content_from_pdf(uploaded_file):
             base64_str = base64.b64encode(img_bytes).decode("utf-8")
             
             # Lista contendo APENAS a imagem da página completa
-            # Formato Data URI necessário para APIs web
             images_data = [f"data:image/png;base64,{base64_str}"]
 
             content_pages.append({
@@ -83,27 +88,17 @@ def extract_content_from_pdf(uploaded_file):
         st.error(f"Erro ao processar PDF: {e}")
         return []
 
-def chunk_text(text, max_chars=2000): # Reduzido para 2000 para forçar mais questões
-    """
-    Divide o texto em chunks menores.
-    Tamanho reduzido para garantir que a IA analise detalhes minuciosos
-    e gere mais questões por página.
-    """
+def chunk_text(text, max_chars=2000):
+    """Divide o texto em chunks menores para processamento de texto puro."""
     paragraphs = text.split("\n")
     chunks = []
     current_chunk = ""
     
     for para in paragraphs:
         para_com_espaco = para + "\n"
-        
-        # Se adicionar o parágrafo atual ultrapassar o limite
         if len(current_chunk) + len(para_com_espaco) > max_chars:
-            
-            # 1. Salva o chunk atual se ele não estiver vazio
             if current_chunk:
                 chunks.append(current_chunk.strip())
-            
-            # 2. Se o parágrafo for ENORME, quebra ele
             if len(para_com_espaco) > max_chars:
                 for i in range(0, len(para_com_espaco), max_chars):
                     chunks.append(para_com_espaco[i:i + max_chars].strip())
@@ -119,10 +114,16 @@ def chunk_text(text, max_chars=2000): # Reduzido para 2000 para forçar mais que
     return chunks
 
 # -------------------------------
-# 🤖 Funções de Geração de IA (PROMPT EXAUSTIVO)
+# 🤖 Funções de Geração e Limpeza
 # -------------------------------
 def limpar_json_ia(content, tipo_lista=True):
     """Tenta extrair um objeto JSON de uma string de resposta da IA."""
+    if not content: return None
+    
+    # Remove blocos de código markdown ```json ... ```
+    content = re.sub(r'```json\s*', '', content)
+    content = re.sub(r'```', '', content)
+    
     if tipo_lista:
         match = re.search(r'\[.*\]', content, re.DOTALL)
     else:
@@ -136,17 +137,53 @@ def limpar_json_ia(content, tipo_lista=True):
     try:
         return json.loads(json_text)
     except json.JSONDecodeError:
-        # st.warning(f"Erro ao decodificar JSON. Conteúdo bruto: {content[:100]}...")
         return None
+
+def normalizar_questoes(lista_raw):
+    """
+    Padroniza as chaves do JSON (aceita inglês ou português) e remove itens incompletos.
+    Isso corrige o bug de questões vazias.
+    """
+    if not isinstance(lista_raw, list):
+        return []
+
+    lista_limpa = []
+    
+    for item in lista_raw:
+        # Tenta encontrar a PERGUNTA em várias chaves
+        pergunta = item.get('pergunta') or item.get('question') or item.get('statement')
+        # Tenta encontrar as OPÇÕES
+        opcoes = item.get('opcoes') or item.get('options') or item.get('choices')
+        # Tenta encontrar a RESPOSTA CORRETA
+        correta = item.get('resposta_correta') or item.get('answer') or item.get('correct_answer') or item.get('correct')
+        # Outros campos
+        tipo = item.get('tipo') or item.get('type') or 'multipla_escolha'
+        trecho = item.get('trecho_referencia') or item.get('context') or ''
+
+        # Validação Básica
+        if pergunta:
+            # Se for múltipla escolha, precisa ter opções
+            if tipo in ['multipla_escolha', 'multi_choice'] and (not opcoes or not isinstance(opcoes, list)):
+                continue 
+            
+            novo_item = {
+                "pergunta": pergunta,
+                "opcoes": opcoes if isinstance(opcoes, list) else [],
+                "resposta_correta": correta,
+                "tipo": "multipla_escolha" if tipo in ['multipla_escolha', 'multi_choice'] else tipo,
+                "trecho_referencia": trecho
+            }
+            lista_limpa.append(novo_item)
+            
+    return lista_limpa
 
 def gerar_questoes_vision_math(pagina_data, dificuldade, estilo):
     """
-    Gera questões analisando texto E imagens (gráficos/fórmulas).
+    Gera questões analisando texto E imagens com sistema de RETRY.
     """
     texto = pagina_data['text']
     imagens = pagina_data['images']
     
-    # Adicionamos "Cálculo" explicitamente ao prompt
     prompt_text = f"""
     MISSÃO: Analise o texto e as IMAGENS (gráficos, tabelas, fórmulas) desta página.
     Gere um Quiz focando em interpretação visual e CÁLCULOS MATEMÁTICOS se houver dados para isso.
@@ -159,76 +196,95 @@ def gerar_questoes_vision_math(pagina_data, dificuldade, estilo):
     - Estilo: {estilo}
     
     INSTRUÇÕES ESPECÍFICAS:
-    1. **VISÃO:** Se houver gráficos ou diagramas nas imagens enviadas, crie questões sobre eles (ex: "Com base no gráfico...").
-    2. **CÁLCULO:** Se houver fórmulas ou números, crie problemas práticos onde o aluno precise calcular a resposta.
-       - Para questões de cálculo, no campo 'trecho_referencia', coloque a resolução passo-a-passo.
-    3. FORMATO JSON ESTRITO (igual ao anterior).
+    1. **VISÃO:** Se houver gráficos ou diagramas, crie questões sobre eles.
+    2. **CÁLCULO:** Se houver fórmulas, crie problemas práticos.
+       - No campo 'trecho_referencia', coloque a resolução passo-a-passo.
+    3. FORMATO JSON ESTRITO (Responda APENAS o JSON):
+    [
+      {{
+        "pergunta": "...",
+        "opcoes": ["A)...", "B)..."], 
+        "resposta_correta": "...",
+        "trecho_referencia": "...",
+        "tipo": "multipla_escolha"
+      }}
+    ]
     """
 
-    # Montagem da mensagem Multimodal (Texto + Imagens)
     messages_content = [{"type": "text", "text": prompt_text}]
     
-    # Adiciona as imagens ao payload
+    # Adiciona a imagem única da página
     for img_b64 in imagens:
         messages_content.append({
             "type": "image_url",
             "image_url": {"url": img_b64}
         })
 
-    try:
-        response = deepseek_client.chat.completions.create(
-            extra_headers=OPENROUTER_HEADERS,
-            model=MODELO_VISAO,
-            messages=[{"role": "user", "content": messages_content}],
-        )
-        content = response.choices[0].message.content
-        return limpar_json_ia(content, tipo_lista=True) or []
-    except Exception as e:
-        st.error(f"Erro na API Vision: {e}")
-        return []
-        
+    # Lógica de Retry (3 tentativas)
+    max_tentativas = 3
+    for tentativa in range(max_tentativas):
+        try:
+            response = client_ai.chat.completions.create(
+                extra_headers=OPENROUTER_HEADERS,
+                model=MODELO_VISAO, # Usando NVIDIA
+                messages=[{"role": "user", "content": messages_content}],
+            )
+            content = response.choices[0].message.content
+            questoes_raw = limpar_json_ia(content, tipo_lista=True)
+            
+            # Se falhou em extrair JSON, tenta limpar markdown extra
+            if not questoes_raw:
+                 # fallback simples
+                 pass 
+
+            return normalizar_questoes(questoes_raw) or []
+            
+        except Exception as e:
+            if "429" in str(e): # Rate Limit
+                time.sleep((tentativa + 1) * 2) # Espera progressiva
+            else:
+                st.error(f"Erro na API Vision ({MODELO_VISAO}): {e}")
+                return []
+    
+    st.warning("IA Ocupada. Tente novamente em instantes.")
+    return []
+
 def refinar_questoes_llama(questoes):
-    """Refina as questões geradas."""
+    """Refina as questões geradas usando um modelo de Texto Forte (Llama 70B)."""
     if not questoes: return []
     prompt = f"""
     Atue como um professor experiente. Revise as questões abaixo para garantir clareza, correção gramatical e didática.
-    Mantenha o formato JSON estritamente idêntico. Não remova questões, apenas melhore o texto.
+    Mantenha o formato JSON estritamente idêntico. Não remova questões.
     
     Questões:
     {json.dumps(questoes, ensure_ascii=False, indent=2)}
     """
     try:
-        response = llama_client.chat.completions.create(
+        response = client_ai.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="nvidia/nemotron-nano-12b-v2-vl:free", # <--- CORRIGIDO AQUI (era MODELO_VISAO=)
+            model="meta-llama/llama-3.3-70b-instruct:free", # Mantendo 70B para garantir JSON perfeito
             messages=[{"role": "user", "content": prompt}],
         )
         content = response.choices[0].message.content
-        return limpar_json_ia(content, tipo_lista=True) or questoes
+        questoes_refinadas = limpar_json_ia(content, tipo_lista=True)
+        return normalizar_questoes(questoes_refinadas) or questoes
     except Exception as e:
+        # Se der erro no refino, retorna as originais para não perder o trabalho da Nvidia
         return questoes
 
 def avaliar_resposta_aberta(resposta_usuario, resposta_correta, trecho_referencia):
     """Avaliação inteligente de respostas abertas."""
-    client = create_openrouter_client()
     prompt = f"""
     Avalie a resposta do aluno.
-    
     ALUNO: {resposta_usuario}
     GABARITO: {resposta_correta}
     FONTE: {trecho_referencia}
-    
-    Retorne JSON:
-    {{
-      "similaridade": 0-100,
-      "correto": true/false,
-      "explicacao": "Explicação didática, usando analogias e palácio da memória se possível, baseada na fonte."
-    }}
+    Retorne JSON: {{ "similaridade": 0-100, "correto": true/false, "explicacao": "..." }}
     """
     try:
-        response = client.chat.completions.create(
+        response = client_ai.chat.completions.create(
             extra_headers=OPENROUTER_HEADERS,
-            model="nvidia/nemotron-nano-12b-v2-vl:free",
+            model="meta-llama/llama-3.3-70b-instruct:free",
             messages=[{"role": "user", "content": prompt}],
         )
         return limpar_json_ia(response.choices[0].message.content, tipo_lista=False)
@@ -267,7 +323,7 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
 
     st.subheader(f"📝 Quiz: {len(questoes)} Questões")
     
-    quiz_id = id(questoes) # Identificador da sessão do quiz
+    quiz_id = id(questoes) 
     
     if f"respostas_{quiz_id}" not in st.session_state:
         st.session_state[f"respostas_{quiz_id}"] = {}
@@ -294,16 +350,13 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
             else:
                 respostas_temp[i] = st.text_area("Resposta:", key=r_key, label_visibility="collapsed")
 
-            # Feedback Pós-Submissão
             if st.session_state[f"verificado_{quiz_id}"]:
                 user_resp = st.session_state[f"respostas_{quiz_id}"].get(i)
                 correta = q.get("resposta_correta", "")
                 
                 if tipo in ["multipla_escolha", "vf", "lacuna"]:
-                    # Lógica simples de string matching
                     acertou = False
                     if user_resp and user_resp.lower().strip() in correta.lower().strip(): acertou = True
-                    # Ajuste fino para multipla escolha (verifica inicio da string "A)")
                     if tipo == "multipla_escolha" and user_resp and user_resp.split(')')[0] == correta.split(')')[0]: acertou = True
                     
                     if acertou: st.success("✅ Correto!")
@@ -312,7 +365,6 @@ def render_quiz_taker(questoes_json, disciplina_nome="Geral", is_temp=False):
                         st.caption(f"📖 Fonte: {q.get('trecho_referencia')}")
                 elif tipo == "aberta":
                     st.info(f"💡 Gabarito sugerido: {correta}")
-                    st.warning("Nota: A correção automática detalhada via IA ocorre individualmente (recurso avançado).")
 
             st.markdown("---")
 
@@ -327,9 +379,8 @@ def render_home_page():
         return
 
     st.title("🧠 QuizIA - Modo Exaustivo")
-    st.info("Geração sem limites: O sistema tentará extrair todas as questões possíveis do seu arquivo.")
+    st.info("Geração com IA Visual (Nvidia) + Refino (Llama 70B)")
     
-    # Save Form
     if st.session_state.show_save_form:
         with st.form("save"):
             st.subheader("💾 Salvar Quiz Gerado")
@@ -341,7 +392,6 @@ def render_home_page():
         if st.button("Cancelar"): st.session_state.show_save_form = None; st.rerun()
         return
 
-    # Results View
     if st.session_state.generated_quiz:
         st.success(f"🎉 **{len(st.session_state.generated_quiz)} questões geradas!**")
         c1, c2, c3 = st.columns(3)
@@ -350,14 +400,11 @@ def render_home_page():
         if c3.button("🗑️ Descartar"): st.session_state.generated_quiz = None; st.rerun()
         return
 
-    # Inputs
     tab1, tab2 = st.tabs(["Upload PDF", "Colar Texto"])
     with tab1: f = st.file_uploader("PDF", type="pdf", label_visibility="collapsed")
     with tab2: t = st.text_area("Texto", height=200, label_visibility="collapsed")
 
-    # ... (dentro de render_home_page) ...
-    
-    # Botão de Ação
+    # Botão de Ação Unificado
     if st.button("🚀 Gerar Quiz Completo", type="primary"):
         paginas_conteudo = []
         
@@ -367,35 +414,32 @@ def render_home_page():
             
         # 2. Se for Texto Colado (Fallback)
         elif t:
-            # Dividimos o texto em pedaços e criamos "páginas falsas" sem imagens
             chunks = chunk_text(t)
             for i, chunk in enumerate(chunks):
                 paginas_conteudo.append({
                     "page": i + 1,
                     "text": chunk,
-                    "images": [] # Lista vazia, pois não tem imagem
+                    "images": [] 
                 })
         
-        # Validação
         if not paginas_conteudo:
             st.warning("Por favor, envie um PDF ou cole um texto.")
             st.stop()
         
-        # 3. Processamento Unificado
         todas_questoes = []
         bar = st.progress(0)
         status = st.empty()
         
         for i, pagina in enumerate(paginas_conteudo):
-            status.text(f"Analisando Parte {pagina['page']} de {len(paginas_conteudo)}...")
+            status.text(f"Analisando Página {pagina['page']} de {len(paginas_conteudo)}...")
             
-            # Chama a IA (Se não tiver imagem, ela analisa só o texto)
+            # Chama a IA de Visão (Nvidia)
             q_pagina = gerar_questoes_vision_math(pagina, st.session_state.config_dificuldade, st.session_state.config_estilo)
             
             if q_pagina:
-                # Opcional: Refinar com Llama (pode descomentar se quiser)
-                # q_pagina = refinar_questoes_llama(q_pagina)
-                todas_questoes.extend(q_pagina)
+                # Chama a IA de Refino (Llama 70B) para melhorar o texto
+                q_pagina_refinada = refinar_questoes_llama(q_pagina)
+                todas_questoes.extend(q_pagina_refinada)
             
             bar.progress((i+1)/len(paginas_conteudo))
             
@@ -403,7 +447,7 @@ def render_home_page():
             st.session_state.generated_quiz = todas_questoes
             st.rerun()
         else:
-            st.error("Não foi possível gerar questões. Tente outro arquivo.")
+            st.error("Não foi possível gerar questões. Tente outro arquivo ou verifique a conexão.")
 
 # -------------------------------
 # 📚 Página Disciplinas
@@ -411,7 +455,6 @@ def render_home_page():
 def render_disciplinas_page():
     st.header("Minha Biblioteca")
     
-    # Navegação para Quiz Salvo
     if st.session_state.selected_quiz_id:
         data = supabase.table("quizzes").select("*").eq("id", st.session_state.selected_quiz_id).single().execute()
         if data.data:
@@ -420,12 +463,10 @@ def render_disciplinas_page():
             st.error("Erro ao abrir."); st.session_state.selected_quiz_id = None
         return
 
-    # Lista de Disciplinas
     try:
         resp = supabase.table("quizzes").select("id, nome, disciplina").execute()
         if not resp.data: st.info("Nada salvo ainda."); return
         
-        # Agrupar
         from collections import defaultdict
         disc_map = defaultdict(list)
         for item in resp.data: disc_map[item['disciplina']].append(item)
@@ -456,7 +497,7 @@ def render_configurar_page():
     st.session_state.config_estilo = st.selectbox(
         "Estilo das Questões",
         ["Múltipla Escolha (Padrão)", "Verdadeiro/Falso", "Resposta Curta (beta)", "Preencher Lacuna", "Estilo Misto (Todos os tipos)"],
-        index=4 # Padrão Misto
+        index=4
     )
 
 # -------------------------------
@@ -464,25 +505,22 @@ def render_configurar_page():
 # -------------------------------
 st.set_page_config(page_title="QuizIA Pro", layout="centered")
 
-# Init States
 defaults = {
     "page": "Home", "generated_quiz": None, "show_save_form": None,
     "quiz_to_take": None, "selected_quiz_id": None, "error_log": [],
     "config_dificuldade": "Padrão (Recomendado)", 
     "config_estilo": "Estilo Misto (Todos os tipos)",
-    "confirm_delete_id": None # Caso precise restaurar a lógica de confirmação
+    "confirm_delete_id": None
 }
 for k, v in defaults.items():
     if k not in st.session_state: st.session_state[k] = v
 
-# Sidebar
 with st.sidebar:
     st.title("QuizIA")
     if st.button("🏠 Criar Quiz"): st.session_state.page = "Home"; st.session_state.generated_quiz = None; st.rerun()
     if st.button("📚 Meus Quizzes"): st.session_state.page = "Disciplinas"; st.session_state.selected_quiz_id = None; st.rerun()
     if st.button("⚙️ Configurar"): st.session_state.page = "Configurar"; st.rerun()
 
-# Router
 if st.session_state.page == "Home": render_home_page()
 elif st.session_state.page == "Disciplinas": render_disciplinas_page()
 elif st.session_state.page == "Configurar": render_configurar_page()
