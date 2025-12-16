@@ -248,7 +248,7 @@ def page_home():
     col1, col2 = st.columns([0.2, 0.8]) 
 
     with col1:
-        st.image("https://media.tenor.com/61a_M0m4M8UAAAAC/cbse-tayari-monu-bhagat.gif", use_container_width=True)
+        st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", use_container_width=True)
     
     with col2:
         st.markdown("""
