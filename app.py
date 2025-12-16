@@ -197,13 +197,16 @@ def carregar_quizzes_db():
 # ------------------------------------------------------------
 # 5. UI DO QUIZ (CORRIGIDO)
 # ------------------------------------------------------------
+# ------------------------------------------------------------
+# 5. UI DO QUIZ (CORRIGIDO)
+# ------------------------------------------------------------
 def render_quiz_runner():
     # 1. Proteção: Verifica se existem questões carregadas
     if "questoes" not in st.session_state or not st.session_state.questoes:
         st.warning("Nenhuma questão carregada. Volte e gere um quiz.")
         return
 
-    # 2. Inicialização: Garante que o contador existe
+    # 2. Inicialização: Garante que o contador existe antes de ler
     if "questao_atual" not in st.session_state:
         st.session_state.questao_atual = 0
         
@@ -253,6 +256,8 @@ def render_quiz_runner():
             if letra_user == letra_gabarito:
                 st.success("✅ Resposta Correta!")
                 st.balloons()
+                # Opcional: GIF de comemoração aqui
+                # st.image("LINK_DO_GIF", width=150)
             else:
                 st.error(f"❌ Incorreto. Correta: {letra_gabarito}")
                 st.markdown(f"**Gabarito:** {q['resposta_correta']}")
@@ -277,7 +282,6 @@ def render_quiz_runner():
         if st.button("➡️ Próxima") and i < len(questoes) - 1:
             st.session_state.questao_atual += 1
             st.rerun()
-
 # ------------------------------------------------------------
 # 6. PÁGINAS
 # ------------------------------------------------------------
