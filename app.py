@@ -4,6 +4,7 @@ import fitz  # PyMuPDF
 import json
 import time
 import re
+import random
 from supabase import create_client, Client
 from openai import OpenAI
 
@@ -19,9 +20,7 @@ except Exception:
     st.stop()
 
 # MODELOS
-# Nvidia: Usado APENAS para olhar gráficos (Vision)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free" 
-# Llama 3.3 70B: O "Cérebro" principal. Muito mais capaz de gerar volume (Texto)
 MODELO_TEXTO = "google/gemini-2.0-flash-exp:free"
 
 SITE_URL = "http://quizia.streamlit.app"
@@ -46,16 +45,12 @@ HEADERS = {
 # 2. FUNÇÕES DE EXTRAÇÃO
 # ------------------------------------------------------------
 def extract_content_from_pdf(uploaded_file):
-    """Extrai texto e imagens de PDF."""
     doc = fitz.open(stream=uploaded_file.read(), filetype="pdf")
     pages = []
-
     for i, page in enumerate(doc):
         text = page.get_text()
-        # Imagem para fallback visual
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
         img_b64 = base64.b64encode(pix.tobytes("png")).decode()
-
         pages.append({
             "page": i + 1,
             "text": text,
@@ -64,10 +59,8 @@ def extract_content_from_pdf(uploaded_file):
     return pages
 
 def chunk_text_manual(texto_bruto):
-    """Simula páginas para texto colado manualmente."""
-    tamanho_chunk = 3000 # Aumentei um pouco para o Llama 70B aproveitar o contexto
+    tamanho_chunk = 3000
     chunks = [texto_bruto[i:i+tamanho_chunk] for i in range(0, len(texto_bruto), tamanho_chunk)]
-    
     paginas_simuladas = []
     for i, chunk in enumerate(chunks):
         paginas_simuladas.append({
@@ -78,113 +71,81 @@ def chunk_text_manual(texto_bruto):
     return paginas_simuladas
 
 def limpar_json_ia(content):
-    """Limpeza agressiva de JSON."""
     if not content: return []
     content = re.sub(r"```json|```", "", content)
     match = re.search(r"\[.*\]", content, re.DOTALL)
-    if not match:
-        return []
+    if not match: return []
     try:
         return json.loads(match.group())
-    except:
-        return []
+    except: return []
 
 def questao_pedagogica(q):
-    """Filtra questões visuais inúteis."""
     blacklist = ["cor", "cores", "layout", "design", "estilo visual", "formatação", "fonte"]
     texto = q.get("pergunta", "").lower()
     return not any(b in texto for b in blacklist)
 
 # ------------------------------------------------------------
-# 3. ENGINE DE GERAÇÃO (A MÁGICA ACONTECE AQUI)
+# 3. ENGINE DE GERAÇÃO (COM ESTILO E DIFICULDADE)
 # ------------------------------------------------------------
-def gerar_questoes(pagina, dificuldade, estilo, densidade="Alta"):
-    """
-    Engine Pedagógico Híbrido:
-    Gera questões que favorecem aprendizado e fixação:
-    - Discursivas curtas
-    - Aplicação
-    - Múltipla escolha bem elaborada
-    - Verdadeiro ou Falso conceitual
-    """
+def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
+    
+    # 1. Lógica de Dificuldade Aleatória
+    dif_final = dificuldade
+    if dificuldade == "Aleatória":
+        dif_final = random.choice(["Fácil", "Médio", "Difícil/Técnico"])
 
-    # Controle de quantidade (conceitual, não mecânico)
+    # 2. Lógica de Estilo Aleatório
+    estilo_final = estilo_selecionado
+    if estilo_selecionado == "Aleatório (Misto)":
+        estilo_final = random.choice(["Múltipla Escolha", "Dissertativa (Aberta)", "Verdadeiro/Falso"])
+
+    # Instrução de densidade
     if densidade == "Extrema":
-        instrucao_qtd = (
-            "Gere várias questões cobrindo TODOS os conceitos relevantes. "
-            "Misture diferentes tipos de questão. Mínimo de 10 questões."
-        )
+        instrucao_qtd = "Gere uma questão para CADA conceito. Mínimo 8 questões."
     elif densidade == "Alta":
-        instrucao_qtd = (
-            "Gere questões cobrindo os conceitos principais e secundários. "
-            "Use diferentes tipos. Mínimo de 6 questões."
-        )
+        instrucao_qtd = "Gere questões cobrindo conceitos principais. Mínimo 5 questões."
     else:
-        instrucao_qtd = (
-            "Gere algumas questões sobre os conceitos centrais."
-        )
+        instrucao_qtd = "Gere 3 questões sobre os pontos chave."
 
     has_text = len(pagina["text"].strip()) > 50
-
     if has_text:
         modelo_uso = MODELO_TEXTO
         conteudo_prompt = f"TEXTO BASE:\n{pagina['text']}"
     else:
         modelo_uso = MODELO_VISAO
-        conteudo_prompt = (
-            "Analise a IMAGEM fornecida (gráfico, tabela ou esquema) "
-            "e extraia os conceitos relevantes."
-        )
+        conteudo_prompt = "Analise a IMAGEM fornecida."
 
-    # 🧠 PROMPT PEDAGÓGICO
+    # Prompt ajustado para suportar tipos variados
     prompt = f"""
-MISSÃO:
-Você está elaborando questões universitárias com foco em APRENDIZADO e FIXAÇÃO de conteúdo.
+    MISSÃO: Gerar questões educacionais.
+    {instrucao_qtd}
+    
+    CONFIGURAÇÃO:
+    - Dificuldade: {dif_final}
+    - Estilo Obrigatório: {estilo_final}
+    
+    {conteudo_prompt}
+    
+    INSTRUÇÃO DE TIPO:
+    - Se Estilo for "Múltipla Escolha": use "tipo": "multipla_escolha" e preencha "opcoes".
+    - Se Estilo for "Verdadeiro/Falso": use "tipo": "verdadeiro_falso" e opcoes ["Verdadeiro", "Falso"].
+    - Se Estilo for "Dissertativa (Aberta)": use "tipo": "dissertativa", deixe "opcoes" como lista vazia [], e coloque a resposta ideal em "resposta_correta".
 
-ESTILO OBRIGATÓRIO:
-- Nível de estudante universitário MEDIANO.
-- Questões claras, objetivas e conceituais.
-- Respostas resumidas, mas SEM perda de informação essencial.
-- Cada questão deve focar UM conceito.
-
-TIPOS DE QUESTÃO (use uma mistura equilibrada):
-1. discursiva_curta → explicação conceitual
-2. aplicacao → uso do conceito em contexto
-3. multipla_escolha → alternativas plausíveis, exigindo raciocínio
-4. verdadeiro_falso → afirmações conceituais claras
-
-REGRAS IMPORTANTES:
-- NÃO crie perguntas de mera decoreba.
-- NÃO crie questões sobre layout, cores ou aspectos visuais irrelevantes.
-- Se houver dados, datas ou definições, explore o SIGNIFICADO ou a FUNÇÃO.
-- Cada questão deve ser útil para estudo.
-
-{instrucao_qtd}
-
-CONFIGURAÇÃO:
-- Dificuldade: {dificuldade}
-- Estilo: {estilo}
-
-{conteudo_prompt}
-
-FORMATO JSON OBRIGATÓRIO (responda APENAS o JSON):
-
-[
-  {{
-    "pergunta": "Enunciado claro e objetivo",
-    "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
-    "resposta_correta": "A) ...",
-    "resposta_esperada": "Resposta discursiva curta e completa",
-    "trecho_referencia": "Trecho curto do texto ou descrição da imagem",
-    "pagina": {pagina["page"]},
-    "tipo": "discursiva_curta | aplicacao | multipla_escolha | verdadeiro_falso"
-  }}
-]
-"""
+    FORMATO JSON OBRIGATÓRIO:
+    [
+      {{
+        "pergunta": "Enunciado...",
+        "opcoes": ["A)...", "B)..."] ou [],
+        "resposta_correta": "Gabarito ou texto ideal",
+        "trecho_referencia": "Contexto do texto",
+        "pagina": {pagina["page"]},
+        "tipo": "multipla_escolha" | "dissertativa" | "verdadeiro_falso"
+      }}
+    ]
+    """
 
     messages = [{"type": "text", "text": prompt}]
-
-    if modelo_uso == MODELO_VISAO and pagina.get("images"):
+    if modelo_uso == MODELO_VISAO and pagina["images"]:
         for img in pagina["images"]:
             messages.append({"type": "image_url", "image_url": {"url": img}})
 
@@ -193,17 +154,51 @@ FORMATO JSON OBRIGATÓRIO (responda APENAS o JSON):
             model=modelo_uso,
             messages=[{"role": "user", "content": messages}],
             extra_headers=HEADERS,
-            temperature=0.3,
-            max_tokens=4000
+            temperature=0.5, 
+            max_tokens=4000  
         )
         raw = limpar_json_ia(response.choices[0].message.content)
         return [q for q in raw if questao_pedagogica(q)]
     except Exception as e:
-        st.error(f"Erro na geração ({modelo_uso}): {e}")
+        st.error(f"Erro na geração: {e}")
         return []
 
 # ------------------------------------------------------------
-# 4. SUPABASE
+# 3.1 FUNÇÃO DE CORREÇÃO COM IA (NOVA)
+# ------------------------------------------------------------
+def avaliar_resposta_ia(pergunta, resposta_aluno, resposta_ideal, contexto):
+    """Usa a IA para corrigir questões abertas."""
+    prompt = f"""
+    Atue como um professor rigoroso mas didático.
+    Avalie a resposta do aluno para a seguinte questão:
+    
+    PERGUNTA: {pergunta}
+    CONTEXTO/FONTE: {contexto}
+    GABARITO IDEAL: {resposta_ideal}
+    
+    RESPOSTA DO ALUNO: {resposta_aluno}
+    
+    Responda EXATAMENTE neste formato JSON:
+    {{
+        "correto": true ou false (considere correto se o sentido estiver certo, mesmo com outras palavras),
+        "feedback": "Explicação curta de onde acertou ou errou."
+    }}
+    """
+    try:
+        response = client_ai.chat.completions.create(
+            model=MODELO_TEXTO,
+            messages=[{"role": "user", "content": prompt}],
+            extra_headers=HEADERS,
+            temperature=0.2
+        )
+        # Tenta limpar markdown caso a IA coloque
+        content = response.choices[0].message.content.replace("```json", "").replace("```", "")
+        return json.loads(content)
+    except:
+        return {"correto": False, "feedback": "Erro ao conectar com o corretor IA."}
+
+# ------------------------------------------------------------
+# 4. SUPABASE E UI
 # ------------------------------------------------------------
 def salvar_quiz_db(disciplina, tema, questoes):
     try:
@@ -219,135 +214,161 @@ def carregar_quizzes_db():
         return supabase.table("quizzes").select("*").order("created_at", desc=True).execute().data
     except: return []
 
+# ------------------------------------------------------------
+# 5. UI DO QUIZ (ATUALIZADA)
+# ------------------------------------------------------------
 def render_quiz_runner():
-    # 1. Proteção: Verifica se existem questões carregadas
     if "questoes" not in st.session_state or not st.session_state.questoes:
-        st.warning("Nenhuma questão carregada. Volte e gere um quiz.")
+        st.warning("Nenhuma questão carregada.")
         return
 
-    # 2. Inicialização: Garante que o contador existe antes de ler
-    if "questao_atual" not in st.session_state:
-        st.session_state.questao_atual = 0
-        
-    # 3. Inicialização: Garante que o banco de erros existe
-    if "banco_erros" not in st.session_state:
-        st.session_state.banco_erros = []
+    if "questao_atual" not in st.session_state: st.session_state.questao_atual = 0
+    if "banco_erros" not in st.session_state: st.session_state.banco_erros = []
+    
+    # Session state para feedback da IA (para não sumir ao recarregar)
+    if "feedback_ia" not in st.session_state: st.session_state.feedback_ia = None
 
     questoes = st.session_state.questoes
     i = st.session_state.questao_atual
-    
-    # Proteção extra: Se o índice estourar (ex: deletou questões), reseta
-    if i >= len(questoes):
-        st.session_state.questao_atual = 0
-        i = 0
+    q = questoes[i]
     
     # Barra de Progresso
     st.progress((i + 1) / len(questoes))
+    st.markdown(f"### Questão {i+1}/{len(questoes)}")
     
-    q = questoes[i]
-    
-    st.markdown(f"### Questão {i+1} de {len(questoes)}")
-    
-    # Exibe fonte/referência de forma elegante
-    fonte = q.get('trecho_referencia', '...')
-    if len(fonte) > 100: fonte = fonte[:100] + "..."
-    st.info(f"📄 Pág {q.get('pagina', '?')} | Fonte: *{fonte}*")
-    
+    # --- REFERÊNCIA OCULTA ---
+    with st.expander("🔍 Ver Fonte / Dica (Oculto)"):
+        st.info(f"Página {q.get('pagina', '?')}")
+        st.write(f"Referência: *{q.get('trecho_referencia', '...')[:300]}*")
+
+    # Enunciado
     st.markdown(f"#### {q['pergunta']}")
-
-    # Radio button com chave única para não conflitar
-    resposta = st.radio(
-        "Alternativas:", 
-        q["opcoes"], 
-        key=f"resp_{i}_{id(q)}", # Key única baseada no ID da questão
-        index=None
-    )
-
-    if st.button("Verificar Resposta"):
-        if not resposta:
-            st.warning("Selecione uma opção!")
-        else:
-            # Lógica de correção (Pega primeira letra)
-            letra_user = resposta.strip()[0].upper()
-            gabarito_raw = q.get("resposta_correta", "A")
-            letra_gabarito = gabarito_raw.strip()[0].upper()
-            
-            if letra_user == letra_gabarito:
-                st.success("✅ Resposta Correta!")
-                st.balloons()
-                # Opcional: GIF de comemoração aqui
-                # st.image("LINK_DO_GIF", width=150)
+    
+    tipo = q.get("tipo", "multipla_escolha").lower()
+    
+    # --- RENDERIZAÇÃO BASEADA NO TIPO ---
+    
+    if "dissertativa" in tipo:
+        # QUESTÃO ABERTA
+        resposta_texto = st.text_area("Sua resposta:", key=f"text_{i}_{id(q)}", height=100)
+        
+        if st.button("🤖 Corrigir com IA"):
+            if len(resposta_texto) < 5:
+                st.warning("Escreva uma resposta mais completa.")
             else:
-                st.error(f"❌ Incorreto. Correta: {letra_gabarito}")
-                st.markdown(f"**Gabarito:** {q['resposta_correta']}")
+                with st.spinner("A IA está lendo sua resposta..."):
+                    avaliacao = avaliar_resposta_ia(
+                        q['pergunta'], 
+                        resposta_texto, 
+                        q['resposta_correta'], 
+                        q.get('trecho_referencia', '')
+                    )
+                    st.session_state.feedback_ia = avaliacao
+        
+        # Exibe Feedback se existir
+        if st.session_state.feedback_ia:
+            res = st.session_state.feedback_ia
+            if res.get("correto"):
+                st.success(f"✅ {res.get('feedback')}")
+            else:
+                st.error(f"❌ {res.get('feedback')}")
+                st.markdown(f"**Resposta Ideal:** {q['resposta_correta']}")
                 
-                # Salva no banco de erros se não existir
-                erro_existente = any(e['pergunta'] == q['pergunta'] for e in st.session_state.banco_erros)
-                if not erro_existente:
+                # Salvar erro
+                if not any(e['pergunta'] == q['pergunta'] for e in st.session_state.banco_erros):
                     st.session_state.banco_erros.append({
                         "pergunta": q["pergunta"],
-                        "sua": resposta,
+                        "sua": resposta_texto,
                         "correta": q["resposta_correta"],
-                        "expl": q.get('trecho_referencia', '')
+                        "expl": res.get("feedback")
                     })
 
-    # Botões de Navegação
+    else:
+        # MÚLTIPLA ESCOLHA OU V/F
+        opcoes = q.get("opcoes", [])
+        if not opcoes: opcoes = ["Verdadeiro", "Falso"] # Fallback
+        
+        resposta = st.radio("Escolha:", opcoes, key=f"radio_{i}_{id(q)}", index=None)
+        
+        if st.button("Verificar Resposta"):
+            if not resposta:
+                st.warning("Selecione uma opção!")
+            else:
+                # Lógica simples de comparação de string ou primeira letra
+                letra_user = resposta.strip()[0].upper()
+                letra_gabarito = q.get("resposta_correta", "A").strip()[0].upper()
+                
+                # Para V/F a comparação deve ser da palavra inteira
+                if "verdadeiro" in tipo or "falso" in tipo:
+                    acertou = resposta.lower() in q.get("resposta_correta", "").lower()
+                else:
+                    acertou = letra_user == letra_gabarito
+
+                if acertou:
+                    st.success("✅ Resposta Correta!")
+                    st.balloons()
+                else:
+                    st.error("❌ Incorreto.")
+                    st.markdown(f"**Gabarito:** {q['resposta_correta']}")
+                    if not any(e['pergunta'] == q['pergunta'] for e in st.session_state.banco_erros):
+                        st.session_state.banco_erros.append({
+                            "pergunta": q["pergunta"],
+                            "sua": resposta,
+                            "correta": q["resposta_correta"],
+                            "expl": q.get('trecho_referencia', '')
+                        })
+
+    # Navegação
+    st.divider()
     c1, c2 = st.columns([1, 1])
     with c1:
         if st.button("⬅️ Anterior") and i > 0:
             st.session_state.questao_atual -= 1
+            st.session_state.feedback_ia = None # Limpa feedback ao mudar
             st.rerun()
     with c2:
         if st.button("➡️ Próxima") and i < len(questoes) - 1:
             st.session_state.questao_atual += 1
+            st.session_state.feedback_ia = None # Limpa feedback ao mudar
             st.rerun()
+
 # ------------------------------------------------------------
-# 6. PÁGINAS
+# 6. HOME
 # ------------------------------------------------------------
 def page_home():
-    col1, col2 = st.columns([0.25, 0.85]) 
-    
-    with col1:
-        st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", width=80)
-    
-    with col2:
-        # margin-top: 0 remove o espaço em branco acima do título
-        # vertical-align ajuda a centralizar com a imagem se precisar
-        st.markdown("""
-            <h1 style='margin-top: 0; padding-top: 0;'>
-                Quiz<span style='color: #9370DB;'>IA</span>
-            </h1>
-            """, unsafe_allow_html=True)
+    st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", width=80)
+    st.title("QuizIA Pro")
     
     c1, c2 = st.columns(2)
-    disciplina = c1.text_input("Disciplina", placeholder="Ex: Biologia")
-    tema = c2.text_input("Tema", placeholder="Ex: Fotossíntese")
+    disciplina = c1.text_input("Disciplina", "Geral")
+    tema = c2.text_input("Tema", "Estudos")
     
     st.markdown("---")
+    st.subheader("⚙️ Configuração de Geração")
     
-    # CONTROLE DE DENSIDADE (NOVIDADE)
-    st.subheader("Configuração de Geração")
-    col_d, col_dif = st.columns(2)
-    densidade = col_d.select_slider("Quantidade de Questões (Densidade)", options=["Padrão", "Alta", "Extrema"], value="Extrema")
-    dificuldade = col_dif.selectbox("Dificuldade", ["Fácil", "Médio", "Difícil/Técnico"], index=1)
+    col1, col2 = st.columns(2)
+    dificuldade = col1.selectbox("Dificuldade", ["Aleatória", "Fácil", "Médio", "Difícil/Técnico"], index=0)
+    estilo = col2.selectbox("Estilo das Questões", ["Aleatório (Misto)", "Múltipla Escolha", "Verdadeiro/Falso", "Dissertativa (Aberta)"], index=0)
+    
+    densidade = st.select_slider("Quantidade/Densidade", options=["Padrão", "Alta", "Extrema"], value="Alta")
 
-    tab_pdf, tab_texto = st.tabs(["📂 PDF (Completo)", "📝 Texto (Colar)"])
+    tab_pdf, tab_texto = st.tabs(["📂 Upload PDF", "📝 Colar Texto"])
     paginas_processar = []
     
     with tab_pdf:
-        pdf = st.file_uploader("Envie seu PDF", type="pdf")
+        pdf = st.file_uploader("Arquivo PDF", type="pdf")
         if pdf:
             paginas_processar = extract_content_from_pdf(pdf)
-            st.success(f"{len(paginas_processar)} páginas carregadas.")
+            st.success(f"{len(paginas_processar)} páginas identificadas.")
 
     with tab_texto:
-        texto = st.text_area("Cole seu texto:", height=150)
+        texto = st.text_area("Texto Manual", height=150)
         if texto:
             paginas_processar = chunk_text_manual(texto)
 
-    if st.button("🚀 Gerar Quiz Completo (Varredura Total)", type="primary"):
+    if st.button("🚀 Gerar Quiz", type="primary"):
         if not paginas_processar:
-            st.warning("Envie um arquivo primeiro.")
+            st.warning("Forneça um PDF ou Texto.")
             return
             
         all_questoes = []
@@ -355,9 +376,9 @@ def page_home():
         status = st.empty()
         
         for idx, p in enumerate(paginas_processar):
-            status.text(f"Analisando Página {p['page']}... (Usando IA para extração profunda)")
-            # Chama a função com a nova lógica de densidade
-            q_batch = gerar_questoes(p, dificuldade, "Técnico", densidade)
+            status.text(f"Processando parte {idx+1}/{len(paginas_processar)}...")
+            # Passa o estilo e dificuldade selecionados
+            q_batch = gerar_questoes(p, dificuldade, estilo, densidade)
             all_questoes.extend(q_batch)
             bar.progress((idx + 1) / len(paginas_processar))
             
@@ -368,7 +389,7 @@ def page_home():
             st.session_state.page = "quiz"
             st.rerun()
         else:
-            st.error("A IA não retornou questões. Tente colar o texto manualmente se o PDF for imagem.")
+            st.error("Falha ao gerar questões. Tente outro texto.")
 
 def page_library():
     st.title("📚 Biblioteca")
@@ -376,7 +397,7 @@ def page_library():
     if not quizzes: st.info("Vazio."); return
 
     for q in quizzes:
-        with st.expander(f"📂 {q['disciplina']} - {q['nome']} ({q['created_at'][:10]})"):
+        with st.expander(f"📂 {q['disciplina']} - {q['nome']}"):
             if st.button(f"Carregar", key=f"load_{q['id']}"):
                 st.session_state.questoes = json.loads(q['questoes'])
                 st.session_state.questao_atual = 0
@@ -385,34 +406,34 @@ def page_library():
                 st.rerun()
 
 def page_quiz():
-    st.title(f"Quiz: {st.session_state.get('tema_atual', 'Geral')}")
-    if st.button("💾 Salvar na Biblioteca"):
-        if salvar_quiz_db(st.session_state.get('disciplina_atual', 'Geral'), st.session_state.get('tema_atual', 'Sem Título'), st.session_state.questoes):
-            st.toast("Salvo!", icon="✅")
+    st.title(f"📝 {st.session_state.get('tema_atual', 'Quiz')}")
+    if st.button("Salvar Progresso"):
+        salvar_quiz_db(st.session_state.get('disciplina_atual'), st.session_state.get('tema_atual'), st.session_state.questoes)
+        st.toast("Salvo!")
     st.markdown("---")
     render_quiz_runner()
 
 def page_erros():
-    st.title("❌ Erros")
-    if not st.session_state.get("banco_erros"): st.success("Sem erros."); return
+    st.title("❌ Revisão de Erros")
+    if not st.session_state.get("banco_erros"): st.info("Nenhum erro registrado."); return
     for e in st.session_state.banco_erros:
-        st.error(f"{e['pergunta']}")
-        st.write(f"❌ Sua: {e['sua']} | ✅ Correta: {e['correta']}")
+        st.error(f"P: {e['pergunta']}")
+        st.write(f"Sua resposta: {e['sua']}")
+        st.success(f"Gabarito: {e['correta']}")
         st.caption(f"Explicação: {e['expl']}")
         st.markdown("---")
 
 # ------------------------------------------------------------
-# 7. NAVEGAÇÃO
+# 7. MAIN
 # ------------------------------------------------------------
 st.set_page_config("QuizIA Pro", layout="centered")
-
 if "page" not in st.session_state: st.session_state.page = "home"
 
 with st.sidebar:
-    st.title("QuizIA Pro")
-    if st.button("🏠 Novo Quiz"): st.session_state.page = "home"; st.rerun()
+    st.title("Menu")
+    if st.button("🏠 Home"): st.session_state.page = "home"; st.rerun()
     if st.button("📚 Biblioteca"): st.session_state.page = "library"; st.rerun()
-    if st.button("📝 Responder"): st.session_state.page = "quiz"; st.rerun()
+    if st.button("📝 Quiz Atual"): st.session_state.page = "quiz"; st.rerun()
     if st.button("❌ Erros"): st.session_state.page = "erros"; st.rerun()
 
 if st.session_state.page == "home": page_home()
