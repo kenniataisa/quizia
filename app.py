@@ -19,11 +19,11 @@ except Exception:
     st.error("❌ Configure as chaves no .streamlit/secrets.toml")
     st.stop()
 
-# MODELOS
-# Nvidia: Usado APENAS para olhar gráficos (Vision)
+# --- ATUALIZAÇÃO DOS MODELOS ---
+# Usado APENAS para imagens/gráficos (Vision)
 MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free" 
-# Gemini 2.0 Flash: Rápido e inteligente para texto e correção
-MODELO_TEXTO = "google/gemini-2.0-flash-exp:free"
+# Usado para texto e raciocínio lógico (Substituto do Gemini)
+MODELO_TEXTO = "xiaomi/mimo-v2-flash:free"
 
 SITE_URL = "http://quizia.streamlit.app"
 SITE_NAME = "QuizIA App"
@@ -116,6 +116,7 @@ def corrigir_discursiva_ia(pergunta, resposta_aluno, gabarito_esperado):
             model=MODELO_TEXTO,
             messages=[{"role": "user", "content": prompt}],
             extra_headers=HEADERS,
+            extra_body={"reasoning": {"enabled": True}}, # Habilita raciocínio
             temperature=0.1
         )
         content = resp.choices[0].message.content
@@ -137,7 +138,6 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     # 2. Lógica de Estilo Aleatório
     estilo_prompt = estilo_selecionado
     if estilo_selecionado == "Aleatório (Misturado)":
-        # Sorteia um estilo predominante para este lote, ou pede misturado
         estilo_prompt = "Misture questões de Múltipla Escolha, Verdadeiro/Falso e Discursivas."
     
     # Instrução de Quantidade
@@ -150,12 +150,15 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
 
     has_text = len(pagina["text"].strip()) > 50
     
+    # --- SELEÇÃO DE MODELO ---
     if has_text:
+        # Usa Xiaomi Mimo se tiver texto
         modelo_uso = MODELO_TEXTO
         conteudo_prompt = f"TEXTO BASE:\n{pagina['text']}"
     else:
+        # Usa Nvidia Nemotron APENAS se for imagem/gráfico
         modelo_uso = MODELO_VISAO
-        conteudo_prompt = "Analise a IMAGEM fornecida (Gráfico/Tabela)."
+        conteudo_prompt = "Analise a IMAGEM fornecida (Gráfico/Tabela/Esquema)."
 
     prompt = f"""
     MISSÃO: Gerar questões de prova universitária.
@@ -172,7 +175,7 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     
     {conteudo_prompt}
     
-    FORMATO JSON OBRIGATÓRIO:
+    FORMATO JSON OBRIGATÓRIO (Responda APENAS o JSON puro):
     [
       {{
         "tipo": "multipla_escolha" ou "verdadeiro_falso" ou "discursiva",
@@ -186,6 +189,8 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     """
 
     messages = [{"type": "text", "text": prompt}]
+    
+    # Anexa imagem apenas se estiver usando o modelo de visão
     if modelo_uso == MODELO_VISAO and pagina["images"]:
         for img in pagina["images"]:
             messages.append({"type": "image_url", "image_url": {"url": img}})
@@ -195,13 +200,14 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
             model=modelo_uso,
             messages=[{"role": "user", "content": messages}],
             extra_headers=HEADERS,
-            temperature=0.5, # Um pouco mais criativo para variar estilos
+            extra_body={"reasoning": {"enabled": True}}, # Habilita raciocínio para ambos
+            temperature=0.5,
             max_tokens=4000
         )
         raw = limpar_json_ia(response.choices[0].message.content)
         return [q for q in raw if questao_pedagogica(q)]
     except Exception as e:
-        st.error(f"Erro na geração: {e}")
+        st.error(f"Erro na geração ({modelo_uso}): {e}")
         return []
 
 # ------------------------------------------------------------
@@ -222,7 +228,7 @@ def carregar_quizzes_db():
     except: return []
 
 # ------------------------------------------------------------
-# 6. UI DO QUIZ (LÓGICA PRINCIPAL ALTERADA)
+# 6. UI DO QUIZ
 # ------------------------------------------------------------
 def render_quiz_runner():
     if "questoes" not in st.session_state or not st.session_state.questoes:
@@ -232,21 +238,17 @@ def render_quiz_runner():
     if "questao_atual" not in st.session_state: st.session_state.questao_atual = 0
     if "banco_erros" not in st.session_state: st.session_state.banco_erros = []
     
-    # Session state para feedback da correção atual
     if "feedback_atual" not in st.session_state: st.session_state.feedback_atual = None
 
     questoes = st.session_state.questoes
     i = st.session_state.questao_atual
     q = questoes[i]
     
-    # Barra de progresso
     st.progress((i + 1) / len(questoes))
     st.caption(f"Questão {i+1} de {len(questoes)} | Tipo: {q.get('tipo', 'Geral').title()}")
 
-    # --- ENUNCIADO ---
     st.markdown(f"#### {q['pergunta']}")
 
-    # --- ÁREA DE RESPOSTA ---
     user_input = None
     submit = False
     
@@ -255,17 +257,15 @@ def render_quiz_runner():
         user_input = st.text_area("Sua resposta:", key=f"txt_{i}", height=100)
         submit = st.button("Corrigir com IA ✨", key=f"btn_{i}")
     
-    # Caso 2: Múltipla Escolha / V-F
+    # Caso 2: Objetiva
     else:
         user_input = st.radio("Selecione:", q["opcoes"], key=f"radio_{i}", index=None)
         submit = st.button("Verificar", key=f"btn_{i}")
 
-    # --- LÓGICA DE CORREÇÃO ---
     if submit:
         if not user_input:
             st.warning("Responda antes de corrigir!")
         else:
-            # Correção Discursiva (Via IA)
             if q.get("tipo") == "discursiva" or not q.get("opcoes"):
                 with st.spinner("A IA está analisando sua resposta..."):
                     is_correct, feedback = corrigir_discursiva_ia(q['pergunta'], user_input, q['resposta_correta'])
@@ -274,13 +274,10 @@ def render_quiz_runner():
                         "msg": feedback,
                         "gabarito": q['resposta_correta']
                     }
-            
-            # Correção Objetiva (Lógica simples)
             else:
                 letra_user = str(user_input).strip()[0].upper()
                 letra_gabarito = str(q.get("resposta_correta", "A")).strip()[0].upper()
                 
-                # Tratamento especial para V/F se a IA não mandou letras
                 if q.get("tipo") == "verdadeiro_falso":
                     is_correct = (str(user_input).lower() == str(q.get("resposta_correta")).lower())
                 else:
@@ -292,7 +289,6 @@ def render_quiz_runner():
                     "gabarito": q['resposta_correta']
                 }
 
-            # Salvar erro se necessário
             if not st.session_state.feedback_atual["correta"]:
                 erro_existente = any(e['pergunta'] == q['pergunta'] for e in st.session_state.banco_erros)
                 if not erro_existente:
@@ -303,7 +299,6 @@ def render_quiz_runner():
                         "expl": q.get('trecho_referencia', '')
                     })
 
-    # --- EXIBIÇÃO DO FEEDBACK (PÓS-CLICK) ---
     if st.session_state.feedback_atual:
         fb = st.session_state.feedback_atual
         if fb["correta"]:
@@ -313,17 +308,14 @@ def render_quiz_runner():
         else:
             st.error("❌ Incorreto.")
             st.write(f"**Feedback:** {fb.get('msg')}")
-            # Se não for discursiva, mostra o gabarito aqui também
             if q.get("tipo") != "discursiva":
                 st.write(f"**Gabarito:** {fb['gabarito']}")
 
-        # --- AQUI: O SPOILER SÓ APARECE DEPOIS DE RESPONDER ---
         with st.expander("🔍 Ver Fonte / Referência no PDF"):
             st.markdown(f"**Página:** {q.get('pagina', '?')}")
             st.info(q.get('trecho_referencia', 'Referência não disponível.'))
 
     st.markdown("---")
-    # Botões de Navegação (Limpam o feedback ao mudar)
     c1, c2 = st.columns([1, 1])
     with c1:
         if st.button("⬅️ Anterior") and i > 0:
@@ -353,23 +345,28 @@ def page_home():
     st.markdown("---")
     st.subheader("⚙️ Configuração do Quiz")
     
-    # NOVOS CONTROLES
-    col_estilo, col_dif = st.columns(2)
+    col_dif, col_estilo, col_vol = st.columns(3)
     
-    # 1. Seletor de Estilo
-    estilo = col_estilo.selectbox(
-        "Estilo das Questões", 
-        ["Aleatório (Misturado)", "Múltipla Escolha", "Verdadeiro ou Falso", "Discursiva"]
-    )
-    
-    # 2. Seletor de Dificuldade (Com opção Aleatória)
-    dificuldade = col_dif.selectbox(
-        "Nível de Dificuldade", 
-        ["Aleatória", "Fácil", "Médio", "Difícil/Técnico"], 
-        index=2
-    )
-    
-    densidade = st.select_slider("Volume de Questões", options=["Padrão", "Alta", "Extrema"], value="Alta")
+    with col_dif:
+        dificuldade = st.selectbox(
+            "Nível de Dificuldade", 
+            ["Aleatória", "Fácil", "Médio", "Difícil/Técnico"], 
+            index=0
+        )
+        
+    with col_estilo:
+        estilo = st.selectbox(
+            "Estilo das Questões", 
+            ["Aleatório (Misturado)", "Múltipla Escolha", "Verdadeiro ou Falso", "Discursiva"],
+            index=0
+        )
+
+    with col_vol:
+        densidade = st.select_slider(
+            "Volume de Questões", 
+            options=["Padrão", "Alta", "Extrema"], 
+            value="Alta"
+        )
 
     tab_pdf, tab_texto = st.tabs(["📂 PDF", "📝 Texto"])
     paginas_processar = []
@@ -387,7 +384,7 @@ def page_home():
 
     if st.button("🚀 Gerar Quiz", type="primary"):
         if not paginas_processar:
-            st.warning("Envie um arquivo primeiro.")
+            st.warning("Envie um arquivo ou cole um texto primeiro.")
             return
             
         all_questoes = []
@@ -395,8 +392,7 @@ def page_home():
         status = st.empty()
         
         for idx, p in enumerate(paginas_processar):
-            status.text(f"Processando pág {p['page']}... (Criando questões {dificuldade}/{estilo})")
-            # Passa os novos parâmetros para a função de geração
+            status.text(f"Processando pág {p['page']}... (Criando questões {dificuldade} / {estilo})")
             q_batch = gerar_questoes(p, dificuldade, estilo, densidade)
             all_questoes.extend(q_batch)
             bar.progress((idx + 1) / len(paginas_processar))
@@ -406,7 +402,7 @@ def page_home():
             st.session_state.disciplina_atual = disciplina
             st.session_state.tema_atual = tema
             st.session_state.page = "quiz"
-            st.session_state.feedback_atual = None # Reseta feedback antigo
+            st.session_state.feedback_atual = None 
             st.rerun()
         else:
             st.error("Falha ao gerar questões. Tente novamente.")
@@ -448,12 +444,12 @@ def page_erros():
 # ------------------------------------------------------------
 # 8. ROTEAMENTO
 # ------------------------------------------------------------
-st.set_page_config("QuizIA Pro", layout="centered")
+st.set_page_config("QuizIA", layout="centered")
 
 if "page" not in st.session_state: st.session_state.page = "home"
 
 with st.sidebar:
-    st.title("QuizIA Pro 2.0")
+    st.title("QuizIA")
     if st.button("🏠 Novo Quiz"): st.session_state.page = "home"; st.rerun()
     if st.button("📚 Biblioteca"): st.session_state.page = "library"; st.rerun()
     if st.button("📝 Responder"): st.session_state.page = "quiz"; st.rerun()
