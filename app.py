@@ -100,63 +100,91 @@ def questao_pedagogica(q):
 # ------------------------------------------------------------
 def gerar_questoes(pagina, dificuldade, estilo, densidade="Alta"):
     """
-    Lógica Híbrida Inteligente:
-    1. Se tiver muito texto -> Usa Llama 70B (Gera MUITAS questões).
-    2. Se tiver pouco texto mas tiver imagem -> Usa Nvidia (Vision).
+    Engine Pedagógico Híbrido:
+    Gera questões que favorecem aprendizado e fixação:
+    - Discursivas curtas
+    - Aplicação
+    - Múltipla escolha bem elaborada
+    - Verdadeiro ou Falso conceitual
     """
-    
-    # Define a "Agressividade" da geração
+
+    # Controle de quantidade (conceitual, não mecânico)
     if densidade == "Extrema":
-        instrucao_qtd = "Gere uma questão para CADA frase informativa. Mínimo 10 questões por bloco."
+        instrucao_qtd = (
+            "Gere várias questões cobrindo TODOS os conceitos relevantes. "
+            "Misture diferentes tipos de questão. Mínimo de 10 questões."
+        )
     elif densidade == "Alta":
-        instrucao_qtd = "Gere questões para cobrir todos os conceitos principais e secundários. Mínimo 5 questões."
+        instrucao_qtd = (
+            "Gere questões cobrindo os conceitos principais e secundários. "
+            "Use diferentes tipos. Mínimo de 6 questões."
+        )
     else:
-        instrucao_qtd = "Gere questões sobre os pontos principais."
+        instrucao_qtd = (
+            "Gere algumas questões sobre os conceitos centrais."
+        )
 
     has_text = len(pagina["text"].strip()) > 50
-    
-    # DECISÃO DE MODELO: Prioriza Llama 70B para texto (é mais inteligente)
+
     if has_text:
         modelo_uso = MODELO_TEXTO
         conteudo_prompt = f"TEXTO BASE:\n{pagina['text']}"
-        input_msg = [{"type": "text", "text": "..."}] # Placeholder
     else:
-        # Só usa visão se não tiver texto legível
         modelo_uso = MODELO_VISAO
-        conteudo_prompt = "Analise a IMAGEM fornecida (Gráfico/Tabela)."
+        conteudo_prompt = (
+            "Analise a IMAGEM fornecida (gráfico, tabela ou esquema) "
+            "e extraia os conceitos relevantes."
+        )
 
+    # 🧠 PROMPT PEDAGÓGICO
     prompt = f"""
-    MISSÃO: Você é um gerador de provas implacável.
-    {instrucao_qtd}
-    
-    COBERTURA EXAUSTIVA:
-    - Não resuma.
-    - Se o texto menciona datas, números, definições ou nomes, CRIE UMA QUESTÃO.
-    - Varra o texto do início ao fim.
-    
-    CONFIGURAÇÃO:
-    - Dificuldade: {dificuldade}
-    - Estilo: {estilo}
-    
-    {conteudo_prompt}
-    
-    FORMATO JSON OBRIGATÓRIO (Responda APENAS o JSON):
-    [
-      {{
-        "pergunta": "Enunciado...",
-        "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
-        "resposta_correta": "A) ... (cópia exata da opção)",
-        "trecho_referencia": "Citação curta do texto",
-        "pagina": {pagina["page"]},
-        "tipo": "multipla_escolha"
-      }}
-    ]
-    """
+MISSÃO:
+Você está elaborando questões universitárias com foco em APRENDIZADO e FIXAÇÃO de conteúdo.
+
+ESTILO OBRIGATÓRIO:
+- Nível de estudante universitário MEDIANO.
+- Questões claras, objetivas e conceituais.
+- Respostas resumidas, mas SEM perda de informação essencial.
+- Cada questão deve focar UM conceito.
+
+TIPOS DE QUESTÃO (use uma mistura equilibrada):
+1. discursiva_curta → explicação conceitual
+2. aplicacao → uso do conceito em contexto
+3. multipla_escolha → alternativas plausíveis, exigindo raciocínio
+4. verdadeiro_falso → afirmações conceituais claras
+
+REGRAS IMPORTANTES:
+- NÃO crie perguntas de mera decoreba.
+- NÃO crie questões sobre layout, cores ou aspectos visuais irrelevantes.
+- Se houver dados, datas ou definições, explore o SIGNIFICADO ou a FUNÇÃO.
+- Cada questão deve ser útil para estudo.
+
+{instrucao_qtd}
+
+CONFIGURAÇÃO:
+- Dificuldade: {dificuldade}
+- Estilo: {estilo}
+
+{conteudo_prompt}
+
+FORMATO JSON OBRIGATÓRIO (responda APENAS o JSON):
+
+[
+  {{
+    "pergunta": "Enunciado claro e objetivo",
+    "opcoes": ["A) ...", "B) ...", "C) ...", "D) ..."],
+    "resposta_correta": "A) ...",
+    "resposta_esperada": "Resposta discursiva curta e completa",
+    "trecho_referencia": "Trecho curto do texto ou descrição da imagem",
+    "pagina": {pagina["page"]},
+    "tipo": "discursiva_curta | aplicacao | multipla_escolha | verdadeiro_falso"
+  }}
+]
+"""
 
     messages = [{"type": "text", "text": prompt}]
-    
-    # Se for usar visão (Nvidia), anexa imagem
-    if modelo_uso == MODELO_VISAO and pagina["images"]:
+
+    if modelo_uso == MODELO_VISAO and pagina.get("images"):
         for img in pagina["images"]:
             messages.append({"type": "image_url", "image_url": {"url": img}})
 
@@ -165,8 +193,8 @@ def gerar_questoes(pagina, dificuldade, estilo, densidade="Alta"):
             model=modelo_uso,
             messages=[{"role": "user", "content": messages}],
             extra_headers=HEADERS,
-            temperature=0.3, # Baixa temperatura para focar em fatos
-            max_tokens=4000  # Aumentado para permitir respostas longas (muitas questões)
+            temperature=0.3,
+            max_tokens=4000
         )
         raw = limpar_json_ia(response.choices[0].message.content)
         return [q for q in raw if questao_pedagogica(q)]
@@ -191,15 +219,6 @@ def carregar_quizzes_db():
         return supabase.table("quizzes").select("*").order("created_at", desc=True).execute().data
     except: return []
 
-# ------------------------------------------------------------
-# 5. UI DO QUIZ
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# 5. UI DO QUIZ (CORRIGIDO)
-# ------------------------------------------------------------
-# ------------------------------------------------------------
-# 5. UI DO QUIZ (CORRIGIDO)
-# ------------------------------------------------------------
 def render_quiz_runner():
     # 1. Proteção: Verifica se existem questões carregadas
     if "questoes" not in st.session_state or not st.session_state.questoes:
