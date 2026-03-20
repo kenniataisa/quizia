@@ -2,11 +2,10 @@ import streamlit as st
 import base64
 import fitz  # PyMuPDF
 import json
-import time
 import re
 import random
 from supabase import create_client, Client
-from openai import OpenAI
+import google.generativeai as genai
 
 # ------------------------------------------------------------
 # 1. CONFIGURAÇÕES E CHAVES
@@ -14,34 +13,16 @@ from openai import OpenAI
 try:
     SUPABASE_URL = st.secrets["SUPABASE_URL"]
     SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
-    OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+    GOOGLE_API_KEY = st.secrets["GOOGLE_API_KEY"]
 except Exception:
     st.error("❌ Configure as chaves no .streamlit/secrets.toml")
     st.stop()
 
-# --- ATUALIZAÇÃO DOS MODELOS ---
-# Usado APENAS para imagens/gráficos (Vision)
-MODELO_VISAO = "nvidia/nemotron-nano-12b-v2-vl:free" 
-# Usado para texto e raciocínio lógico (Substituto do Gemini)
-MODELO_TEXTO = "xiaomi/mimo-v2-flash:free"
+genai.configure(api_key=GOOGLE_API_KEY)
 
-SITE_URL = "http://quizia.streamlit.app"
-SITE_NAME = "QuizIA App"
+MODELO = "gemini-2.0-flash"  # Gratuito, suporta texto e imagem
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-def create_openrouter_client():
-    return OpenAI(
-        base_url="https://openrouter.ai/api/v1",
-        api_key=OPENROUTER_API_KEY
-    )
-
-client_ai = create_openrouter_client()
-
-HEADERS = {
-    "HTTP-Referer": SITE_URL,
-    "X-Title": SITE_NAME
-}
 
 # ------------------------------------------------------------
 # 2. FUNÇÕES DE EXTRAÇÃO E UTILITÁRIOS
@@ -52,11 +33,11 @@ def extract_content_from_pdf(uploaded_file):
     for i, page in enumerate(doc):
         text = page.get_text()
         pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-        img_b64 = base64.b64encode(pix.tobytes("png")).decode()
+        img_bytes = pix.tobytes("png")
         pages.append({
             "page": i + 1,
             "text": text,
-            "images": [f"data:image/png;base64,{img_b64}"]
+            "img_bytes": img_bytes  # bytes puros para o Gemini
         })
     return pages
 
@@ -68,15 +49,17 @@ def chunk_text_manual(texto_bruto):
         paginas_simuladas.append({
             "page": i + 1,
             "text": chunk,
-            "images": [] 
+            "img_bytes": None
         })
     return paginas_simuladas
 
 def limpar_json_ia(content):
-    if not content: return []
+    if not content:
+        return []
     content = re.sub(r"```json|```", "", content)
     match = re.search(r"\[.*\]", content, re.DOTALL)
-    if not match: return []
+    if not match:
+        return []
     try:
         return json.loads(match.group())
     except:
@@ -91,7 +74,6 @@ def questao_pedagogica(q):
 # 3. CORREÇÃO DE DISCURSIVAS COM IA
 # ------------------------------------------------------------
 def corrigir_discursiva_ia(pergunta, resposta_aluno, gabarito_esperado):
-    """Usa a IA para avaliar a resposta aberta do aluno."""
     if not resposta_aluno or len(resposta_aluno.strip()) < 2:
         return False, "Resposta muito curta ou vazia."
 
@@ -106,20 +88,15 @@ def corrigir_discursiva_ia(pergunta, resposta_aluno, gabarito_esperado):
     
     Responda EXATAMENTE neste formato JSON:
     {{
-        "correta": true/false,
+        "correta": true ou false,
         "feedback": "Explique brevemente por que está certo ou errado e o que faltou."
     }}
     """
-    
+
     try:
-        resp = client_ai.chat.completions.create(
-            model=MODELO_TEXTO,
-            messages=[{"role": "user", "content": prompt}],
-            extra_headers=HEADERS,
-            extra_body={"reasoning": {"enabled": True}}, # Habilita raciocínio
-            temperature=0.1
-        )
-        content = resp.choices[0].message.content
+        model = genai.GenerativeModel(MODELO)
+        resp = model.generate_content(prompt)
+        content = resp.text
         data = json.loads(re.search(r"\{.*\}", content, re.DOTALL).group())
         return data["correta"], data["feedback"]
     except Exception as e:
@@ -129,17 +106,17 @@ def corrigir_discursiva_ia(pergunta, resposta_aluno, gabarito_esperado):
 # 4. ENGINE DE GERAÇÃO
 # ------------------------------------------------------------
 def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
-    
-    # 1. Lógica de Dificuldade Aleatória
+
+    # Lógica de Dificuldade Aleatória
     dif_real = dificuldade
     if dificuldade == "Aleatória":
         dif_real = random.choice(["Fácil", "Médio", "Difícil/Técnico"])
 
-    # 2. Lógica de Estilo Aleatório
+    # Lógica de Estilo Aleatório
     estilo_prompt = estilo_selecionado
     if estilo_selecionado == "Aleatório (Misturado)":
         estilo_prompt = "Misture questões de Múltipla Escolha, Verdadeiro/Falso e Discursivas."
-    
+
     # Instrução de Quantidade
     if densidade == "Extrema":
         qtd = "Mínimo 8 questões."
@@ -148,16 +125,11 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     else:
         qtd = "Gere 3 questões focais."
 
-    has_text = len(pagina["text"].strip()) > 50
-    
-    # --- SELEÇÃO DE MODELO ---
+    has_text = pagina["text"] and len(pagina["text"].strip()) > 50
+
     if has_text:
-        # Usa Xiaomi Mimo se tiver texto
-        modelo_uso = MODELO_TEXTO
         conteudo_prompt = f"TEXTO BASE:\n{pagina['text']}"
     else:
-        # Usa Nvidia Nemotron APENAS se for imagem/gráfico
-        modelo_uso = MODELO_VISAO
         conteudo_prompt = "Analise a IMAGEM fornecida (Gráfico/Tabela/Esquema)."
 
     prompt = f"""
@@ -175,7 +147,7 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     
     {conteudo_prompt}
     
-    FORMATO JSON OBRIGATÓRIO (Responda APENAS o JSON puro):
+    FORMATO JSON OBRIGATÓRIO (Responda APENAS o JSON puro, sem markdown):
     [
       {{
         "tipo": "multipla_escolha" ou "verdadeiro_falso" ou "discursiva",
@@ -188,26 +160,23 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
     ]
     """
 
-    messages = [{"type": "text", "text": prompt}]
-    
-    # Anexa imagem apenas se estiver usando o modelo de visão
-    if modelo_uso == MODELO_VISAO and pagina["images"]:
-        for img in pagina["images"]:
-            messages.append({"type": "image_url", "image_url": {"url": img}})
-
     try:
-        response = client_ai.chat.completions.create(
-            model=modelo_uso,
-            messages=[{"role": "user", "content": messages}],
-            extra_headers=HEADERS,
-            extra_body={"reasoning": {"enabled": True}}, # Habilita raciocínio para ambos
-            temperature=0.5,
-            max_tokens=4000
-        )
-        raw = limpar_json_ia(response.choices[0].message.content)
+        model = genai.GenerativeModel(MODELO)
+
+        # Monta o conteúdo — adiciona imagem se não tiver texto
+        if not has_text and pagina.get("img_bytes"):
+            contents = [
+                {"mime_type": "image/png", "data": pagina["img_bytes"]},
+                prompt
+            ]
+        else:
+            contents = [prompt]
+
+        response = model.generate_content(contents)
+        raw = limpar_json_ia(response.text)
         return [q for q in raw if questao_pedagogica(q)]
     except Exception as e:
-        st.error(f"Erro na geração ({modelo_uso}): {e}")
+        st.error(f"Erro na geração: {e}")
         return []
 
 # ------------------------------------------------------------
@@ -215,7 +184,7 @@ def gerar_questoes(pagina, dificuldade, estilo_selecionado, densidade="Alta"):
 # ------------------------------------------------------------
 def salvar_quiz_db(disciplina, tema, questoes):
     try:
-        data = { "disciplina": disciplina, "nome": tema, "questoes": json.dumps(questoes) }
+        data = {"disciplina": disciplina, "nome": tema, "questoes": json.dumps(questoes)}
         supabase.table("quizzes").insert(data).execute()
         return True
     except Exception as e:
@@ -225,7 +194,8 @@ def salvar_quiz_db(disciplina, tema, questoes):
 def carregar_quizzes_db():
     try:
         return supabase.table("quizzes").select("*").order("created_at", desc=True).execute().data
-    except: return []
+    except:
+        return []
 
 # ------------------------------------------------------------
 # 6. UI DO QUIZ
@@ -237,27 +207,22 @@ def render_quiz_runner():
 
     if "questao_atual" not in st.session_state: st.session_state.questao_atual = 0
     if "banco_erros" not in st.session_state: st.session_state.banco_erros = []
-    
     if "feedback_atual" not in st.session_state: st.session_state.feedback_atual = None
 
     questoes = st.session_state.questoes
     i = st.session_state.questao_atual
     q = questoes[i]
-    
+
     st.progress((i + 1) / len(questoes))
     st.caption(f"Questão {i+1} de {len(questoes)} | Tipo: {q.get('tipo', 'Geral').title()}")
-
     st.markdown(f"#### {q['pergunta']}")
 
     user_input = None
     submit = False
-    
-    # Caso 1: Discursiva
+
     if q.get("tipo") == "discursiva" or not q.get("opcoes"):
         user_input = st.text_area("Sua resposta:", key=f"txt_{i}", height=100)
         submit = st.button("Corrigir com IA ✨", key=f"btn_{i}")
-    
-    # Caso 2: Objetiva
     else:
         user_input = st.radio("Selecione:", q["opcoes"], key=f"radio_{i}", index=None)
         submit = st.button("Verificar", key=f"btn_{i}")
@@ -277,7 +242,7 @@ def render_quiz_runner():
             else:
                 letra_user = str(user_input).strip()[0].upper()
                 letra_gabarito = str(q.get("resposta_correta", "A")).strip()[0].upper()
-                
+
                 if q.get("tipo") == "verdadeiro_falso":
                     is_correct = (str(user_input).lower() == str(q.get("resposta_correta")).lower())
                 else:
@@ -332,45 +297,45 @@ def render_quiz_runner():
 # 7. HOME
 # ------------------------------------------------------------
 def page_home():
-    col1, col2 = st.columns([0.25, 0.85]) 
+    col1, col2 = st.columns([0.25, 0.85])
     with col1:
         st.image("https://media.tenor.com/drzSGxNJG3sAAAAi/cbse-tayari.gif", width=80)
     with col2:
         st.markdown("<h1 style='margin-top: 0;'>Quiz<span style='color: #9370DB;'>IA</span> Pro</h1>", unsafe_allow_html=True)
-    
+
     c1, c2 = st.columns(2)
     disciplina = c1.text_input("Disciplina", placeholder="Ex: Anatomia")
     tema = c2.text_input("Tema", placeholder="Ex: Sistema Nervoso")
-    
+
     st.markdown("---")
     st.subheader("⚙️ Configuração do Quiz")
-    
+
     col_dif, col_estilo, col_vol = st.columns(3)
-    
+
     with col_dif:
         dificuldade = st.selectbox(
-            "Nível de Dificuldade", 
-            ["Aleatória", "Fácil", "Médio", "Difícil/Técnico"], 
+            "Nível de Dificuldade",
+            ["Aleatória", "Fácil", "Médio", "Difícil/Técnico"],
             index=0
         )
-        
+
     with col_estilo:
         estilo = st.selectbox(
-            "Estilo das Questões", 
+            "Estilo das Questões",
             ["Aleatório (Misturado)", "Múltipla Escolha", "Verdadeiro ou Falso", "Discursiva"],
             index=0
         )
 
     with col_vol:
         densidade = st.select_slider(
-            "Volume de Questões", 
-            options=["Padrão", "Alta", "Extrema"], 
+            "Volume de Questões",
+            options=["Padrão", "Alta", "Extrema"],
             value="Alta"
         )
 
     tab_pdf, tab_texto = st.tabs(["📂 PDF", "📝 Texto"])
     paginas_processar = []
-    
+
     with tab_pdf:
         pdf = st.file_uploader("Envie seu PDF", type="pdf")
         if pdf:
@@ -386,31 +351,36 @@ def page_home():
         if not paginas_processar:
             st.warning("Envie um arquivo ou cole um texto primeiro.")
             return
-            
+
         all_questoes = []
         bar = st.progress(0)
         status = st.empty()
-        
+
         for idx, p in enumerate(paginas_processar):
             status.text(f"Processando pág {p['page']}... (Criando questões {dificuldade} / {estilo})")
             q_batch = gerar_questoes(p, dificuldade, estilo, densidade)
             all_questoes.extend(q_batch)
             bar.progress((idx + 1) / len(paginas_processar))
-            
+
         if all_questoes:
             st.session_state.questoes = all_questoes
             st.session_state.disciplina_atual = disciplina
             st.session_state.tema_atual = tema
             st.session_state.page = "quiz"
-            st.session_state.feedback_atual = None 
+            st.session_state.feedback_atual = None
             st.rerun()
         else:
             st.error("Falha ao gerar questões. Tente novamente.")
 
+# ------------------------------------------------------------
+# 8. PÁGINAS SECUNDÁRIAS
+# ------------------------------------------------------------
 def page_library():
     st.title("📚 Biblioteca")
     quizzes = carregar_quizzes_db()
-    if not quizzes: st.info("Vazio."); return
+    if not quizzes:
+        st.info("Vazio.")
+        return
 
     for q in quizzes:
         with st.expander(f"📂 {q['disciplina']} - {q['nome']} ({q['created_at'][:10]})"):
@@ -432,7 +402,9 @@ def page_quiz():
 
 def page_erros():
     st.title("❌ Revisão de Erros")
-    if not st.session_state.get("banco_erros"): st.success("Nenhum erro registrado."); return
+    if not st.session_state.get("banco_erros"):
+        st.success("Nenhum erro registrado.")
+        return
     for e in st.session_state.banco_erros:
         st.error(f"{e['pergunta']}")
         st.write(f"❌ **Sua resposta:** {e['sua']}")
@@ -442,11 +414,12 @@ def page_erros():
         st.markdown("---")
 
 # ------------------------------------------------------------
-# 8. ROTEAMENTO
+# 9. ROTEAMENTO
 # ------------------------------------------------------------
 st.set_page_config("QuizIA", layout="centered")
 
-if "page" not in st.session_state: st.session_state.page = "home"
+if "page" not in st.session_state:
+    st.session_state.page = "home"
 
 with st.sidebar:
     st.title("QuizIA")
