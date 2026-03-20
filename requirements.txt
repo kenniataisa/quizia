@@ -1,5 +1,4 @@
+google-generativeai
 streamlit
-PyMuPDF
 supabase
-openai
-fitz
+PyMuPDF
